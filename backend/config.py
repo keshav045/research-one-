@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     ANCHOR_VARIANT_WORDS: list[str] = [
         "3d", "sentence-", "group", "fast", "swin", "rotary", "survey", "overview", "review"
     ]
+    ANCHOR_PREFIX_PREFERENCE: bool = True
 
     # Factual Lookup Ranking Weights
     FACTUAL_SEMANTIC_WEIGHT: float = 0.35

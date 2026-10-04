@@ -280,7 +280,16 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
     db.commit()
 
     stage_stats: list[StageStat] = []
-    debug_info: dict[str, Any] = {}
+    debug_info: dict[str, Any] = {
+        "seed_papers_enabled": getattr(settings, "SEED_PAPERS_ENABLED", True),
+        "disable_cache": getattr(settings, "DISABLE_CACHE", False),
+    }
+    logger.info(
+        "[Pipeline] Job %s config: SEED_PAPERS_ENABLED=%s, DISABLE_CACHE=%s",
+        job_id,
+        debug_info["seed_papers_enabled"],
+        debug_info["disable_cache"],
+    )
 
     def record_stage(name: str, t_start: float, in_count: int, out_count: int, error: Optional[str] = None):
         dur = int((time.time() - t_start) * 1000)
@@ -413,6 +422,9 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
             anchor_debug["anchor_paper_id"] = anchor_id
             job.anchor_paper_id = anchor_id
             debug_info["anchor_paper_id"] = anchor_id
+            anchor_paper.is_anchor = True
+            if matched_p:
+                matched_p.is_anchor = True
         else:
             job.anchor_paper_id = None
             debug_info["anchor_paper_id"] = None

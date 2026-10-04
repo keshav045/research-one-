@@ -125,6 +125,65 @@ def validate_title_guesses(title_guesses: list[str]) -> list[str]:
     return valid
 
 
+def check_derivative_guard(title: str, question: str = "") -> bool:
+    """
+    Step 5A: Derivative Guard with whole-word matching and question exclusion.
+    - Matches whole words only (e.g. \b{word}\b).
+    - Skips a variant word if it appears in the question itself.
+    - Returns True if a derivative variant is detected.
+    """
+    variant_words = getattr(settings, "ANCHOR_VARIANT_WORDS", ["3d", "sentence-", "group", "fast", "swin", "rotary", "survey", "overview", "review"])
+    t_lower = (title or "").lower()
+    q_lower = (question or "").lower()
+
+    for vw in variant_words:
+        vw_clean = vw.strip().lower()
+        if not vw_clean:
+            continue
+        # Construct whole-word regex pattern
+        if vw_clean.endswith("-"):
+            pat = r"\b" + re.escape(vw_clean)
+        else:
+            pat = r"\b" + re.escape(vw_clean) + r"\b"
+
+        # Skip if variant word appears in the question itself
+        if q_lower and re.search(pat, q_lower):
+            continue
+
+        # Whole-word match against title
+        if re.search(pat, t_lower):
+            return True
+
+    return False
+
+
+def _gated_title_starts_with_key_phrase(title: str, key_terms: list[str]) -> bool:
+    """
+    Step 5B: Check if the gated candidate's title STARTS with the key phrase
+    (before ':' or ' -').
+    """
+    if not title or not key_terms:
+        return False
+
+    prefix_match = re.split(r":|\s-\s|\s-", title)[0].strip()
+    norm_prefix = normalize_paper_title(prefix_match)
+    words_prefix = norm_prefix.split()
+
+    for kt in key_terms:
+        norm_kt = normalize_paper_title(kt)
+        if not norm_kt:
+            continue
+        words_kt = norm_kt.split()
+        if not words_kt:
+            continue
+        if words_prefix[:len(words_kt)] == words_kt:
+            return True
+        if norm_prefix.startswith(norm_kt):
+            return True
+
+    return False
+
+
 def extract_key_terms(question: str) -> list[str]:
     """
     Extracts key term(s) from the question without an LLM:
@@ -395,8 +454,7 @@ async def select_anchor_paper(
         best_anchor = exact_in_q[0]
         conf = "high"
         conf_note = ""
-        variant_words = getattr(settings, "ANCHOR_VARIANT_WORDS", ["3d", "sentence-", "group", "fast", "swin", "rotary", "survey", "overview", "review"])
-        if any(vw in best_anchor.title.lower() for vw in variant_words):
+        if check_derivative_guard(best_anchor.title, question):
             conf = "uncertain"
             conf_note = f"Derivative variant detected in anchor title: '{best_anchor.title}'"
         logger.info("[Anchor] Rule 'exact_title_in_question' selected anchor: '%s' (cites=%d >= %d, conf=%s)", best_anchor.title, get_cites(best_anchor), min_citations, conf)
@@ -423,8 +481,7 @@ async def select_anchor_paper(
             best_anchor = exact_matches[0]
             conf = "high"
             conf_note = ""
-            variant_words = getattr(settings, "ANCHOR_VARIANT_WORDS", ["3d", "sentence-", "group", "fast", "swin", "rotary", "survey", "overview", "review"])
-            if any(vw in best_anchor.title.lower() for vw in variant_words):
+            if check_derivative_guard(best_anchor.title, question):
                 conf = "uncertain"
                 conf_note = f"Derivative variant detected in anchor title: '{best_anchor.title}'"
             logger.info("[Anchor] Rule 'exact_title_guess' selected anchor: '%s' (cites=%d >= %d, conf=%s)", best_anchor.title, get_cites(best_anchor), min_citations, conf)
@@ -568,13 +625,29 @@ async def select_anchor_paper(
             anchor_rule = "ensemble_agreement"
             logger.info("[Anchor] Ensemble agreement: '%s' (cites=%d)", chosen_anchor.title, get_cites(chosen_anchor))
         else:
-            # If they differ: anchor = chasing result, anchor_confidence="uncertain", alternate = gated result
-            chosen_anchor = chasing_anchor
-            alternate_paper = gated_anchor
-            anchor_confidence = "uncertain"
-            anchor_rule = "ensemble_chasing_preferred"
-            confidence_note = f"Source paper uncertain: '{chasing_anchor.title}' or '{gated_anchor.title}'"
-            logger.warning("[Anchor] Ensemble divergence: %s", confidence_note)
+            # Step 5B: Arbitration when the two methods disagree
+            prefix_pref = getattr(settings, "ANCHOR_PREFIX_PREFERENCE", True)
+            gated_has_prefix = _gated_title_starts_with_key_phrase(gated_anchor.title, key_terms)
+            gated_meets_cites = get_cites(gated_anchor) >= min_citations
+
+            if prefix_pref and gated_has_prefix and gated_meets_cites:
+                chosen_anchor = gated_anchor
+                alternate_paper = chasing_anchor
+                anchor_confidence = "uncertain"
+                anchor_rule = "ensemble_gated_prefix_preferred"
+                confidence_note = f"Source paper uncertain: '{gated_anchor.title}' or '{chasing_anchor.title}'"
+                logger.info(
+                    "[Anchor] Disagreement arbitration (ANCHOR_PREFIX_PREFERENCE): preferred gated candidate '%s' over chasing '%s'",
+                    gated_anchor.title,
+                    chasing_anchor.title,
+                )
+            else:
+                chosen_anchor = chasing_anchor
+                alternate_paper = gated_anchor
+                anchor_confidence = "uncertain"
+                anchor_rule = "ensemble_chasing_preferred"
+                confidence_note = f"Source paper uncertain: '{chasing_anchor.title}' or '{gated_anchor.title}'"
+                logger.warning("[Anchor] Ensemble divergence: %s", confidence_note)
     elif chasing_anchor:
         chosen_anchor = chasing_anchor
         anchor_rule = "chasing_only"
@@ -595,14 +668,11 @@ async def select_anchor_paper(
         }
 
     # Apply derivative guard (PART 0, rule 7)
-    variant_words = getattr(settings, "ANCHOR_VARIANT_WORDS", ["3d", "sentence-", "group", "fast", "swin", "rotary", "survey", "overview", "review"])
-    if chosen_anchor:
-        t_lower = chosen_anchor.title.lower()
-        if any(vw in t_lower for vw in variant_words):
-            anchor_confidence = "uncertain"
-            note = f"Derivative variant detected in anchor title: '{chosen_anchor.title}'"
-            confidence_note = f"{confidence_note}; {note}" if confidence_note else note
-            logger.warning("[Anchor] Derivative guard triggered: %s", note)
+    if chosen_anchor and check_derivative_guard(chosen_anchor.title, question):
+        anchor_confidence = "uncertain"
+        note = f"Derivative variant detected in anchor title: '{chosen_anchor.title}'"
+        confidence_note = f"{confidence_note}; {note}" if confidence_note else note
+        logger.warning("[Anchor] Derivative guard triggered: %s", note)
 
     return chosen_anchor, papers, {
         "anchor_paper_id": chosen_anchor.id,

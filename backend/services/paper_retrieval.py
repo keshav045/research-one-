@@ -387,7 +387,6 @@ async def _fetch_s2_with_retry(query: str, limit: int, headers: dict) -> list[Pa
                         "query": query,
                         "limit": limit,
                         "fields": S2_FIELDS,
-                        "openAccessPdf": "",
                     }
                     if getattr(settings, "DEFAULT_FIELDS_OF_STUDY", ""):
                         params["fieldsOfStudy"] = settings.DEFAULT_FIELDS_OF_STUDY.strip()
