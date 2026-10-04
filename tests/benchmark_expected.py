@@ -76,6 +76,40 @@ BENCHMARK_EXPECTED: dict[str, dict[str, Any]] = {
         ],
         "expected_dois": ["10.48550/arxiv.1301.3781"],
     },
+    "BERT": {
+        "question": "Which paper introduced BERT?",
+        "expected_arxiv": ["1810.04805"],
+        "expected_titles": [
+            "bert pre training of deep bidirectional transformers for language understanding",
+            "bert pretraining of deep bidirectional transformers for language understanding",
+        ],
+        "expected_dois": ["10.48550/arxiv.1810.04805"],
+    },
+    "U-Net": {
+        "question": "Which paper introduced U-Net?",
+        "expected_arxiv": ["1505.04597"],
+        "expected_titles": [
+            "u net convolutional networks for biomedical image segmentation",
+            "unet convolutional networks for biomedical image segmentation",
+        ],
+        "expected_dois": ["10.48550/arxiv.1505.04597"],
+    },
+    "Faster R-CNN": {
+        "question": "Which paper introduced Faster R-CNN?",
+        "expected_arxiv": ["1506.01497"],
+        "expected_titles": [
+            "faster r cnn towards real time object detection with region proposal networks",
+        ],
+        "expected_dois": ["10.48550/arxiv.1506.01497"],
+    },
+    "Latent Diffusion": {
+        "question": "Which paper introduced High-Resolution Image Synthesis with Latent Diffusion Models?",
+        "expected_arxiv": ["2112.10752"],
+        "expected_titles": [
+            "high resolution image synthesis with latent diffusion models",
+        ],
+        "expected_dois": ["10.48550/arxiv.2112.10752"],
+    },
 }
 
 

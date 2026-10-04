@@ -211,26 +211,74 @@ def create_abstract_fallback_passage(paper: Paper) -> list[PaperPassage]:
     ]
 
 
+def resolve_paper_pdf_urls(paper: Paper) -> list[str]:
+    """
+    Resolves PDF candidates for a paper in exact priority order:
+    1. paper.pdfUrl
+    2. https://arxiv.org/pdf/<arXiv ID> if an arXiv ID is known
+    3. S2 openAccessPdf URL
+    4. OpenAlex open-access URL
+    """
+    candidates = []
+    # 1. paper.pdfUrl
+    if paper.pdfUrl and isinstance(paper.pdfUrl, str) and paper.pdfUrl.startswith("http"):
+        candidates.append(paper.pdfUrl.strip())
+
+    # 2. arXiv URL from id or doi
+    arxiv_id = None
+    doi_val = (getattr(paper, "doi", "") or "").lower()
+    if "10.48550/arxiv." in doi_val:
+        raw = doi_val.split("10.48550/arxiv.")[-1].strip()
+        arxiv_id = re.sub(r"v\d+$", "", raw)
+    elif (getattr(paper, "id", "") or "").startswith("arxiv-"):
+        raw = paper.id[len("arxiv-"):].strip()
+        arxiv_id = re.sub(r"v\d+$", "", raw)
+
+    if arxiv_id:
+        arxiv_url = f"https://arxiv.org/pdf/{arxiv_id}"
+        if arxiv_url not in candidates:
+            candidates.append(arxiv_url)
+
+    # 3. S2 openAccessPdf URL or other OA URL stored in paper attributes
+    oa_url = getattr(paper, "openAccessPdfUrl", None) or getattr(paper, "oa_url", None)
+    if oa_url and isinstance(oa_url, str) and oa_url.startswith("http"):
+        oa_clean = oa_url.strip()
+        if oa_clean not in candidates:
+            candidates.append(oa_clean)
+
+    return candidates
+
+
 async def extract_paper_passages(paper: Paper) -> list[PaperPassage]:
     """
     Downloads and extracts passages for a single paper with PyMuPDF.
-    Guarantees that a paper ALWAYS has at least 1 passage (falls back to abstract).
+    Attempts all resolved PDF URLs in priority order before falling back to abstract.
+    Guarantees that a paper ALWAYS has at least 1 passage.
     """
-    if paper.pdfUrl:
-        pdf_bytes = await _download_pdf(paper.pdfUrl)
-        if pdf_bytes:
-            passages = _extract_passages_from_pdf_bytes(paper.id, pdf_bytes)
-            if passages:
-                paper.passages = passages
-                paper.passages_json = json.dumps([p.model_dump() for p in passages])
-                logger.info("[PDF] Extracted %d passages from %s", len(passages), paper.title[:50])
-                return passages
+    pdf_urls = resolve_paper_pdf_urls(paper)
+    for url in pdf_urls:
+        try:
+            pdf_bytes = await _download_pdf(url)
+            if pdf_bytes:
+                passages = _extract_passages_from_pdf_bytes(paper.id, pdf_bytes)
+                if passages:
+                    paper.passages = passages
+                    paper.passages_json = json.dumps([p.model_dump() for p in passages])
+                    paper.pdfUrl = url
+                    logger.info("[PDF] Extracted %d passages from %s via %s", len(passages), paper.title[:50], url)
+                    return passages
+        except Exception as exc:
+            logger.debug("[PDF] Failed downloading %s: %s", url, exc)
 
-    # Fallback to abstract if PDF fails or URL missing
+    # Fallback to abstract if all PDF attempts fail
     passages = create_abstract_fallback_passage(paper)
     paper.passages = passages
     paper.passages_json = json.dumps([p.model_dump() for p in passages])
-    logger.info("[PDF] Using abstract fallback (1 passage) for '%s'", paper.title[:50])
+    is_anchor = getattr(paper, "is_anchor", False)
+    if is_anchor:
+        logger.warning("[Anchor-PDF] Using abstract only fallback for anchor '%s' (warning: full PDF text unavailable)", paper.title)
+    else:
+        logger.info("[PDF] Using abstract fallback (1 passage) for '%s'", paper.title[:50])
     return passages
 
 

@@ -165,9 +165,44 @@ def _set_cached_response(source: str, query: str, data: list[dict]) -> None:
 # ─── Global Locks & Error Tracking ────────────────────────────────────────────
 
 _arxiv_lock = asyncio.Lock()
-_s2_lock = asyncio.Lock()
+class S2RateLimiter:
+    """
+    Process-wide mutual-exclusion rate limiter for Semantic Scholar:
+    - Exactly ONE S2 call executing at any instant across the entire process.
+    - >= 1.25s spacing (with API key) or >= 3.0s (unauthenticated) from the end of the previous call.
+    - Honors Retry-After headers by shifting the next available window.
+    """
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self._last_call_end = 0.0
+
+    async def __aenter__(self):
+        await self._lock.acquire()
+        is_authenticated = bool(settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
+        min_interval = 1.25 if is_authenticated else 3.0
+        now = time.time()
+        elapsed = now - self._last_call_end
+        if elapsed < min_interval:
+            await asyncio.sleep(min_interval - elapsed)
+        return self
+
+    def penalize(self, wait_seconds: float):
+        """Pushes the next call window into the future based on Retry-After."""
+        now = time.time()
+        self._last_call_end = max(self._last_call_end, now + wait_seconds)
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        now = time.time()
+        if self._last_call_end <= now:
+            self._last_call_end = now
+        try:
+            self._lock.release()
+        except RuntimeError:
+            pass
+
+_s2_limiter = S2RateLimiter()
+_s2_lock = _s2_limiter._lock  # Backward compatibility alias
 _last_arxiv_call_time = 0.0
-_last_s2_call_time = 0.0
 _retrieval_errors: list[str] = []
 _s2_call_records: list[dict] = []
 
@@ -201,8 +236,6 @@ def _record_s2_call(query: str, status_code: int, papers_count: int = 0, error: 
         "duration_ms": duration_ms,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
-    global _last_s2_call_time
-    _last_s2_call_time = time.time()
 
 
 def get_and_clear_s2_call_records() -> list[dict]:
@@ -223,15 +256,8 @@ async def _throttle_arxiv():
 
 
 async def _throttle_s2():
-    """Ensure polite spacing between successive Semantic Scholar requests (>= 3s when unauthenticated, >= 1.2s when authenticated)."""
-    global _last_s2_call_time
-    is_authenticated = bool(settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
-    min_interval = 1.2 if is_authenticated else 3.0
-    now = time.time()
-    elapsed = now - _last_s2_call_time
-    if elapsed < min_interval:
-        await asyncio.sleep(min_interval - elapsed)
-    _last_s2_call_time = time.time()
+    """Spacing is automatically handled by _s2_limiter context manager."""
+    pass
 
 
 def _parse_arxiv_xml(xml_text: str) -> list[Paper]:
@@ -356,54 +382,52 @@ class S2ServerError(Exception):
     reraise=False,
 )
 async def _fetch_s2_with_retry(query: str, limit: int, headers: dict) -> list[Paper]:
-    """Fetch from Semantic Scholar Graph API with automatic 429 and 5xx retries, >= 1.2s spacing, and per-call tracking."""
-    async with _s2_lock:
-        await _throttle_s2()
-        t0 = time.time()
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                params = {
-                    "query": query,
-                    "limit": limit,
-                    "fields": S2_FIELDS,
-                    "openAccessPdf": "",
-                }
-                if getattr(settings, "DEFAULT_FIELDS_OF_STUDY", ""):
-                    params["fieldsOfStudy"] = settings.DEFAULT_FIELDS_OF_STUDY.strip()
-                resp = await client.get(S2_SEARCH_API, params=params, headers=headers)
-                dur_ms = int((time.time() - t0) * 1000)
+    """Fetch from Semantic Scholar Graph API with process-wide rate limiting, Retry-After backoff, and tracking."""
+    max_attempts = 4
+    for attempt in range(1, max_attempts + 1):
+        async with _s2_limiter:
+            t0 = time.time()
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    params = {
+                        "query": query,
+                        "limit": limit,
+                        "fields": S2_FIELDS,
+                        "openAccessPdf": "",
+                    }
+                    if getattr(settings, "DEFAULT_FIELDS_OF_STUDY", ""):
+                        params["fieldsOfStudy"] = settings.DEFAULT_FIELDS_OF_STUDY.strip()
+                    resp = await client.get(S2_SEARCH_API, params=params, headers=headers)
+                    dur_ms = int((time.time() - t0) * 1000)
 
-                if resp.status_code == 429:
-                    is_authenticated = bool(settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
-                    if not is_authenticated:
-                        msg = f"Semantic Scholar HTTP 429 rate limit (unauthenticated) for query '{query[:40]}'. Continuing with other sources."
-                        logger.warning("[S2] %s", msg)
+                    if resp.status_code == 429:
+                        is_authenticated = bool(settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
+                        retry_after = resp.headers.get("Retry-After")
+                        wait_sec = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() else 3.0
+                        msg = f"Semantic Scholar HTTP 429 rate limit for query '{query[:40]}'"
+                        logger.warning("[S2] %s. Retry-After: %.1fs (attempt %d/%d)", msg, wait_sec, attempt, max_attempts)
                         _record_retrieval_error(msg)
                         _record_s2_call(query, 429, 0, error=msg, duration_ms=dur_ms)
+                        _s2_limiter.penalize(wait_sec)
+                        if not is_authenticated:
+                            return []
+                        await asyncio.sleep(wait_sec)
+                        continue
+
+                    if resp.status_code >= 500:
+                        msg = f"Semantic Scholar HTTP {resp.status_code} server error for query '{query[:40]}'"
+                        logger.warning("[S2] %s (attempt %d/%d)", msg, attempt, max_attempts)
+                        _record_retrieval_error(msg)
+                        _record_s2_call(query, resp.status_code, 0, error=msg, duration_ms=dur_ms)
+                        await asyncio.sleep(2.0 * attempt)
+                        continue
+
+                    if resp.status_code != 200:
+                        msg = f"Semantic Scholar HTTP {resp.status_code} for query '{query[:40]}'"
+                        logger.warning("[S2] %s: %s", msg, resp.text[:100])
+                        _record_retrieval_error(msg)
+                        _record_s2_call(query, resp.status_code, 0, error=msg, duration_ms=dur_ms)
                         return []
-
-                    retry_after = resp.headers.get("Retry-After")
-                    wait_sec = int(retry_after) if retry_after and retry_after.isdigit() else 3
-                    msg = f"Semantic Scholar HTTP 429 rate limit for query '{query[:40]}'"
-                    logger.warning("[S2] %s. Retrying after %ds", msg, wait_sec)
-                    _record_retrieval_error(msg)
-                    _record_s2_call(query, 429, 0, error=msg, duration_ms=dur_ms)
-                    await asyncio.sleep(wait_sec)
-                    raise RateLimitException("Semantic Scholar 429 rate limit")
-
-                if resp.status_code >= 500:
-                    msg = f"Semantic Scholar HTTP {resp.status_code} server error for query '{query[:40]}'"
-                    logger.warning("[S2] %s. Retrying...", msg)
-                    _record_retrieval_error(msg)
-                    _record_s2_call(query, resp.status_code, 0, error=msg, duration_ms=dur_ms)
-                    raise S2ServerError(msg)
-
-                if resp.status_code != 200:
-                    msg = f"Semantic Scholar HTTP {resp.status_code} for query '{query[:40]}'"
-                    logger.warning("[S2] %s: %s", msg, resp.text[:100])
-                    _record_retrieval_error(msg)
-                    _record_s2_call(query, resp.status_code, 0, error=msg, duration_ms=dur_ms)
-                    return []
 
                 data = resp.json()
                 raw_papers = data.get("data", [])
@@ -544,8 +568,7 @@ async def enrich_papers_with_s2(papers: list[Paper]) -> list[Paper]:
     batch_size = 500
     for i in range(0, len(all_ids), batch_size):
         batch_ids = all_ids[i : i + batch_size]
-        async with _s2_lock:
-            await _throttle_s2()
+        async with _s2_limiter:
             t0 = time.time()
             try:
                 async with httpx.AsyncClient(timeout=25.0) as client:
@@ -559,17 +582,17 @@ async def enrich_papers_with_s2(papers: list[Paper]) -> list[Paper]:
                     dur_ms = int((time.time() - t0) * 1000)
 
                     if resp.status_code == 429:
+                        retry_after = resp.headers.get("Retry-After")
+                        wait_sec = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() else 3.0
                         msg = f"Semantic Scholar batch rate limited (HTTP 429 for {len(batch_ids)} ids)"
-                        logger.warning("[S2-Batch] %s", msg)
+                        logger.warning("[S2-Batch] %s. Retry-After: %.1fs", msg, wait_sec)
                         _record_s2_call(f"batch:{len(batch_ids)}", 429, 0, error=msg, duration_ms=dur_ms)
                         _record_retrieval_error(msg)
+                        _s2_limiter.penalize(wait_sec)
                         if not is_authenticated:
                             logger.info("[S2-Batch] Unauthenticated S2 batch rate limited; continuing with OpenAlex enrichment.")
                             break
-                        retry_after = resp.headers.get("Retry-After")
-                        wait_sec = int(retry_after) if retry_after and retry_after.isdigit() else 3
                         await asyncio.sleep(wait_sec)
-                        await _throttle_s2()
                         resp = await client.post(
                             S2_BATCH_API,
                             params=params,

@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     # OpenAlex Polite Pool & API Key
     OPENALEX_EMAIL: str = "researchlens.tool@gmail.com"
     OPENALEX_API_KEY: str = ""
-    OPENALEX_FIELD_FILTER: str = "concepts.id:C41008148"
+    OPENALEX_FIELD_FILTER: str = "topics.field.id:17"
 
     # Domain / Field of Study Filters
     DEFAULT_FIELDS_OF_STUDY: str = "Computer Science"
