@@ -135,6 +135,7 @@ class Paper(BaseModel):
     passages: Optional[list[PaperPassage]] = None
     passages_json: Optional[str] = None
     fullText: Optional[str] = None
+    is_anchor: bool = False
 
 
 # ─── Citation & NLI ───────────────────────────────────────────────────────────
