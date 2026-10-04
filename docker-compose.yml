@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+  # ── Python FastAPI Backend ─────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: researchlens-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
+      - SEMANTIC_SCHOLAR_API_KEY=${SEMANTIC_SCHOLAR_API_KEY:-}
+      - DATABASE_URL=${DATABASE_URL:-sqlite:///./data/researchlens.db}
+      - NLI_MODEL=${NLI_MODEL:-cross-encoder/nli-deberta-v3-small}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      - PDF_CACHE_DIR=/app/data/pdf_cache
+      - HOST=0.0.0.0
+      - PORT=8000
+    volumes:
+      - researchlens_data:/app/data
+      - huggingface_cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── React Frontend (production build served by Nginx) ─────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+        VITE_GEMINI_API_KEY: ${VITE_GEMINI_API_KEY:-}
+    container_name: researchlens-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  researchlens_data:
+  huggingface_cache:

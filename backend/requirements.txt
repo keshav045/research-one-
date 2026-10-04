@@ -1,0 +1,52 @@
+# ── Web Framework ─────────────────────────────────────────────────────────────
+fastapi==0.115.4
+uvicorn[standard]==0.32.0
+python-multipart==0.0.12
+aiofiles==24.1.0
+
+# ── Environment & Config ──────────────────────────────────────────────────────
+python-dotenv==1.0.1
+
+# ── HTTP & APIs ───────────────────────────────────────────────────────────────
+httpx==0.27.2
+requests==2.32.3
+
+# ── PDF Extraction (PyMuPDF) ──────────────────────────────────────────────────
+pymupdf==1.24.11
+
+# ── ML: Embeddings (Sentence Transformers) ────────────────────────────────────
+sentence-transformers==3.3.1
+
+# ── ML: NLI / Claim Verification (Hugging Face) ───────────────────────────────
+transformers==4.46.2
+torch==2.5.1
+
+# ── Vector Database (FAISS) ───────────────────────────────────────────────────
+faiss-cpu==1.9.0
+
+# ── Numerical / Data ─────────────────────────────────────────────────────────
+numpy==1.26.4
+
+# ── LLM: Gemini API ───────────────────────────────────────────────────────────
+google-generativeai==0.8.3
+
+# ── LLM: Qwen (Alibaba DashScope — OpenAI-compatible) ────────────────────────
+openai>=1.0.0
+
+# ── Database (SQLite via SQLAlchemy, upgradeable to PostgreSQL) ───────────────
+sqlalchemy==2.0.36
+alembic==1.13.3
+
+# ── Serialization ─────────────────────────────────────────────────────────────
+pydantic==2.10.1
+pydantic-settings==2.6.1
+
+# ── Retries & Utilities ───────────────────────────────────────────────────────
+tenacity>=8.2.0
+accelerate>=0.26.0
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+respx>=0.21.0
+

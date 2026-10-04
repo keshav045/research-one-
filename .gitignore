@@ -1,0 +1,68 @@
+# ─── Node / Frontend ──────────────────────────────────────────────────────────
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─── Python / Backend ─────────────────────────────────────────────────────────
+venv/
+backend/venv/
+backend/__pycache__/
+backend/models/__pycache__/
+backend/services/__pycache__/
+backend/routers/__pycache__/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+*.egg
+.eggs/
+
+# ─── Runtime Artifacts ────────────────────────────────────────────────────────
+# SQLite database (created at runtime)
+*.db
+*.sqlite3
+
+# PDF download cache (created at runtime)
+pdf_cache/
+
+# ─── Environment / Secrets ────────────────────────────────────────────────────
+# NEVER commit real API keys
+.env
+.env.local
+.env.*.local
+backend/.env
+# .env.example files are intentionally NOT ignored (safe templates only)
+
+# ─── Editor ───────────────────────────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ─── Testing ──────────────────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+htmlcov/
+.pytest_cache/
+
+# ─── Misc ─────────────────────────────────────────────────────────────────────
+*.bak
+*.tmp
+*.orig

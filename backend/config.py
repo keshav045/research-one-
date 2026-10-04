@@ -1,0 +1,92 @@
+"""Backend configuration loaded from .env via pydantic-settings."""
+
+from functools import lru_cache
+from pathlib import Path
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        # Anchor to this file's directory so the correct backend/.env is loaded
+        # regardless of what CWD uvicorn was launched from.
+        env_file=str(Path(__file__).parent / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # LLM Provider: "ollama" (local Ollama server) | "local" (HF weights) | "qwen" | "gemini"
+    LLM_PROVIDER: str = "ollama"
+
+    # Ollama (quantized local server — no API key required)
+    OLLAMA_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "qwen2.5:3b-instruct"
+
+    # Local LLM (HuggingFace — no API key required, heavy download)
+    LOCAL_LLM_MODEL: str = "Qwen/Qwen2.5-0.5B-Instruct"
+    LOCAL_LLM_MAX_TOKENS: int = 1536
+
+    # Qwen (Alibaba DashScope — OpenAI-compatible)
+    QWEN_API_KEY: str = ""
+    QWEN_MODEL: str = "qwen-plus"
+
+    # Gemini (fallback / alternative)
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.0-flash"
+
+    # Semantic Scholar
+    SEMANTIC_SCHOLAR_API_KEY: str = ""
+
+    # Database
+    DATABASE_URL: str = "sqlite:///./researchlens.db"
+
+    # Server
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+
+    # ML Models
+    NLI_MODEL: str = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+    EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
+    RERANK_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    NLI_DEVICE: str = "cuda"
+    NLI_ENTAIL_THRESHOLD: float = 0.80
+    RELEVANCE_THRESHOLD: float = 0.30
+    ANCHOR_MIN_CITATIONS: int = 500
+    DEPTH_COUNTS: dict[str, int] = {"Quick": 6, "Standard": 12, "Deep": 24}
+
+    # File system
+    PDF_CACHE_DIR: str = "./pdf_cache"
+    MAX_PDF_WORKERS: int = 4
+
+    @property
+    def is_ollama_configured(self) -> bool:
+        return self.LLM_PROVIDER.lower() == "ollama"
+
+    @property
+    def is_gemini_configured(self) -> bool:
+        return bool(self.GEMINI_API_KEY) and self.GEMINI_API_KEY != "your_gemini_api_key_here"
+
+    @property
+    def is_qwen_configured(self) -> bool:
+        return bool(self.QWEN_API_KEY) and self.QWEN_API_KEY != "your_qwen_api_key_here"
+
+    @property
+    def is_local_llm_configured(self) -> bool:
+        return True
+
+    @property
+    def is_llm_configured(self) -> bool:
+        """True if any LLM provider is ready."""
+        provider = self.LLM_PROVIDER.lower()
+        if provider == "ollama":
+            return True  # assumes ollama server is running
+        if provider == "local":
+            return True
+        return self.is_qwen_configured or self.is_gemini_configured
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()
