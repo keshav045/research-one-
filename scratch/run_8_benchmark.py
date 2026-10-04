@@ -103,34 +103,34 @@ BENCHMARK_QUESTIONS = [
         "is_nonsense": False,
     },
     {
-        "topic": "LoRA",
-        "question": "Which paper introduced LoRA?",
-        "is_nonsense": False,
-    },
-    {
-        "topic": "CLIP",
-        "question": "Which paper introduced CLIP?",
-        "is_nonsense": False,
-    },
-    {
-        "topic": "PPO",
-        "question": "Which paper introduced PPO?",
-        "is_nonsense": False,
-    },
-    {
-        "topic": "DDPM",
-        "question": "Which paper introduced DDPM?",
-        "is_nonsense": False,
-    },
-    {
-        "topic": "ResNet",
-        "question": "Which paper introduced ResNet?",
-        "is_nonsense": False,
-    },
-    {
         "topic": "Nonsense",
         "question": "What is the capital of the Moon's mayor?",
         "is_nonsense": True,
+    },
+    {
+        "topic": "DenseNet",
+        "question": "Which paper introduced DenseNet?",
+        "is_nonsense": False,
+    },
+    {
+        "topic": "Mask R-CNN",
+        "question": "Which paper introduced Mask R-CNN?",
+        "is_nonsense": False,
+    },
+    {
+        "topic": "Graph Convolutional Networks",
+        "question": "Which paper introduced Graph Convolutional Networks?",
+        "is_nonsense": False,
+    },
+    {
+        "topic": "T5",
+        "question": "Which paper introduced T5?",
+        "is_nonsense": False,
+    },
+    {
+        "topic": "YOLO",
+        "question": "Which paper introduced YOLO?",
+        "is_nonsense": False,
     },
 ]
 
@@ -454,6 +454,7 @@ async def main():
                 "duration_s": round(time.time() - t0, 1),
             })
         out_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+        await asyncio.sleep(2.0)
 
     logger.info("Benchmark complete! Saved to %s", out_path)
 

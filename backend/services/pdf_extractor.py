@@ -37,36 +37,77 @@ def _cache_path(url: str) -> Path:
     return PDF_CACHE / f"{digest}.pdf"
 
 
+import time
+
+_last_arxiv_download_time: float = 0.0
+_arxiv_download_lock = asyncio.Lock()
+
+
+async def _throttle_arxiv_download():
+    """Ensure at least 3.0 seconds between arXiv requests."""
+    global _last_arxiv_download_time
+    async with _arxiv_download_lock:
+        now = time.time()
+        elapsed = now - _last_arxiv_download_time
+        if elapsed < 3.0:
+            await asyncio.sleep(3.0 - elapsed)
+        _last_arxiv_download_time = time.time()
+
+
 async def _download_pdf(url: str) -> Optional[bytes]:
-    """Download a PDF, with local cache to avoid re-fetching (max 80MB, timeout 30s)."""
+    """Download a PDF, with local cache to avoid re-fetching (max 80MB, timeout 30s).
+    Includes arXiv politeness (>= 3s spacing, retry on 429/503).
+    """
     cached = _cache_path(url)
     if cached.exists():
         return cached.read_bytes()
 
-    try:
-        async with httpx.AsyncClient(
-            timeout=30.0,
-            follow_redirects=True,
-            headers={"User-Agent": "ResearchLens/2.0 (academic research tool)"},
-        ) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
+    is_arxiv = "arxiv.org" in url.lower()
+    headers = {"User-Agent": "ResearchLens/2.0 (mailto:researchlens.tool@gmail.com; academic research tool)"}
+    max_attempts = 3 if is_arxiv else 1
 
-            content = resp.content
-            if len(content) > MAX_PDF_SIZE_BYTES:
-                logger.warning("[PDF] Exceeds size limit (%d bytes > %d limit): %s", len(content), MAX_PDF_SIZE_BYTES, url)
-                return None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if is_arxiv:
+                await _throttle_arxiv_download()
 
-            if "pdf" not in resp.headers.get("content-type", "") and not content.startswith(b"%PDF"):
-                logger.warning("[PDF] Response is not valid PDF for %s", url)
-                return None
+            async with httpx.AsyncClient(
+                timeout=30.0,
+                follow_redirects=True,
+                headers=headers,
+            ) as client:
+                resp = await client.get(url)
 
-            cached.write_bytes(content)
-            logger.info("[PDF] Downloaded and cached %d bytes: %s", len(content), url)
-            return content
-    except Exception as exc:
-        logger.warning("[PDF] Download failed for %s: %s", url, exc)
-        return None
+                if resp.status_code in (429, 503) and attempt < max_attempts:
+                    retry_after = resp.headers.get("Retry-After")
+                    wait_sec = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() else (3.0 * attempt)
+                    logger.warning("[PDF] %s HTTP %d rate limit/server error. Retrying after %.1fs (attempt %d/%d)", url, resp.status_code, wait_sec, attempt, max_attempts)
+                    await asyncio.sleep(wait_sec)
+                    continue
+
+                resp.raise_for_status()
+
+                content = resp.content
+                if len(content) > MAX_PDF_SIZE_BYTES:
+                    logger.warning("[PDF] Exceeds size limit (%d bytes > %d limit): %s", len(content), MAX_PDF_SIZE_BYTES, url)
+                    return None
+
+                if "pdf" not in resp.headers.get("content-type", "") and not content.startswith(b"%PDF"):
+                    logger.warning("[PDF] Response is not valid PDF for %s", url)
+                    return None
+
+                cached.write_bytes(content)
+                logger.info("[PDF] Downloaded and cached %d bytes: %s", len(content), url)
+                return content
+        except Exception as exc:
+            if attempt < max_attempts:
+                logger.warning("[PDF] Download attempt %d failed for %s (%s), retrying...", attempt, url, exc)
+                await asyncio.sleep(2.0 * attempt)
+                continue
+            logger.warning("[PDF] Download failed for %s: %s", url, exc)
+            return None
+
+    return None
 
 
 def _split_into_sentences(text: str) -> list[str]:
@@ -211,27 +252,30 @@ def create_abstract_fallback_passage(paper: Paper) -> list[PaperPassage]:
     ]
 
 
-CANONICAL_ARXIV_MAP = {
-    "generative adversarial nets": "1406.2661",
-    "generative adversarial networks": "1406.2661",
-    "dropout a simple way to prevent neural networks from overfitting": "1207.0580",
-}
+def _normalize_title_for_lookup(title: str) -> str:
+    """Normalize paper title for exact equality checks (lowercase alphanumeric only)."""
+    return re.sub(r"[^a-z0-9 ]", "", (title or "").lower()).strip()
 
 
-def resolve_paper_pdf_urls(paper: Paper) -> list[str]:
+async def resolve_paper_pdf_urls(paper: Paper) -> list[str]:
     """
     Resolves PDF candidates for a paper in exact priority order:
-    1. paper.pdfUrl
-    2. https://arxiv.org/pdf/<arXiv ID> if an arXiv ID is known
+    1. paper.pdfUrl (if valid)
+    2. https://arxiv.org/pdf/<arXiv ID> if an arXiv ID is known or resolved:
+       - Direct ID check (arxiv-<id> or DOI containing 10.48550/arxiv.)
+       - S2 paper detail endpoint (externalIds.ArXiv)
+       - OpenAlex API (ids.arxiv or locations landing page)
+       - arXiv search by exact title (accepted ONLY if normalized title matches exactly)
     3. S2 openAccessPdf URL
     4. OpenAlex open-access URL
     """
-    candidates = []
+    candidates: list[str] = []
+
     # 1. paper.pdfUrl
     if paper.pdfUrl and isinstance(paper.pdfUrl, str) and paper.pdfUrl.startswith("http"):
         candidates.append(paper.pdfUrl.strip())
 
-    # 2. arXiv URL from id, doi, or canonical mapping
+    # 2. arXiv ID resolution cascade
     arxiv_id = None
     doi_val = (getattr(paper, "doi", "") or "").lower()
     if "10.48550/arxiv." in doi_val:
@@ -241,12 +285,87 @@ def resolve_paper_pdf_urls(paper: Paper) -> list[str]:
         raw = paper.id[len("arxiv-"):].strip()
         arxiv_id = re.sub(r"v\d+$", "", raw)
 
+    # Cascade Step 2: Look up through S2 paper detail endpoint (externalIds)
     if not arxiv_id:
-        norm_t = re.sub(r"[^a-z0-9 ]", "", paper.title.lower()).strip()
-        for k_t, a_id in CANONICAL_ARXIV_MAP.items():
-            if norm_t == k_t or k_t in norm_t:
-                arxiv_id = a_id
-                break
+        s2_id = None
+        if (getattr(paper, "id", "") or "").startswith("s2-"):
+            s2_id = paper.id[len("s2-"):].strip()
+        if s2_id:
+            try:
+                headers = {"User-Agent": "ResearchLens/2.0 (mailto:researchlens.tool@gmail.com)"}
+                if settings.SEMANTIC_SCHOLAR_API_KEY:
+                    headers["x-api-key"] = settings.SEMANTIC_SCHOLAR_API_KEY
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get(
+                        f"https://api.semanticscholar.org/graph/v1/paper/{s2_id}?fields=externalIds",
+                        headers=headers,
+                    )
+                    if resp.status_code == 200:
+                        ext = resp.json().get("externalIds") or {}
+                        if ext.get("ArXiv"):
+                            arxiv_id = str(ext["ArXiv"]).strip()
+                            logger.info("[PDF] Resolved arXiv ID %s for '%s' via S2 detail endpoint", arxiv_id, paper.title[:40])
+            except Exception as exc:
+                logger.debug("[PDF] S2 detail arXiv lookup failed for %s: %s", s2_id, exc)
+
+    # Cascade Step 3: Look up through OpenAlex
+    if not arxiv_id and paper.title:
+        try:
+            norm_target = _normalize_title_for_lookup(paper.title)
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"https://api.openalex.org/works?search={paper.title}&per_page=5&mailto=researchlens.tool@gmail.com"
+                )
+                if resp.status_code == 200:
+                    results = resp.json().get("results", [])
+                    for w in results:
+                        w_title = w.get("title") or ""
+                        if _normalize_title_for_lookup(w_title) == norm_target:
+                            ids = w.get("ids") or {}
+                            if ids.get("arxiv"):
+                                raw_ar = ids["arxiv"].split("/abs/")[-1].strip()
+                                arxiv_id = re.sub(r"v\d+$", "", raw_ar)
+                                logger.info("[PDF] Resolved arXiv ID %s for '%s' via OpenAlex", arxiv_id, paper.title[:40])
+                                break
+                            for loc in (w.get("locations") or []):
+                                if isinstance(loc, dict):
+                                    u = loc.get("landing_page_url") or ""
+                                    if "arxiv.org/abs/" in u:
+                                        raw_ar = u.split("arxiv.org/abs/")[-1].strip()
+                                        arxiv_id = re.sub(r"v\d+$", "", raw_ar)
+                                        logger.info("[PDF] Resolved arXiv ID %s for '%s' via OpenAlex location", arxiv_id, paper.title[:40])
+                                        break
+                            if arxiv_id:
+                                break
+        except Exception as exc:
+            logger.debug("[PDF] OpenAlex arXiv lookup failed for '%s': %s", paper.title[:30], exc)
+
+    # Cascade Step 4: Search arXiv by exact title (accept ONLY exact normalized title match)
+    if not arxiv_id and paper.title:
+        try:
+            await _throttle_arxiv_download()
+            norm_target = _normalize_title_for_lookup(paper.title)
+            clean_ti = re.sub(r"[^a-zA-Z0-9 ]", " ", paper.title).strip()
+            params = {"search_query": f'ti:"{clean_ti}"', "max_results": 5}
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get("https://export.arxiv.org/api/query", params=params)
+                if resp.status_code == 200:
+                    import xml.etree.ElementTree as ET
+                    ns = {"atom": "http://www.w3.org/2005/Atom"}
+                    root = ET.fromstring(resp.text)
+                    for entry in root.findall("atom:entry", ns):
+                        e_title_el = entry.find("atom:title", ns)
+                        if e_title_el is not None and e_title_el.text:
+                            e_title = e_title_el.text.strip()
+                            if _normalize_title_for_lookup(e_title) == norm_target:
+                                raw_id_el = entry.find("atom:id", ns)
+                                if raw_id_el is not None and raw_id_el.text:
+                                    raw_id = raw_id_el.text.strip().split("/abs/")[-1].strip()
+                                    arxiv_id = re.sub(r"v\d+$", "", raw_id)
+                                    logger.info("[PDF] Resolved arXiv ID %s for '%s' via exact title match on arXiv", arxiv_id, paper.title[:40])
+                                    break
+        except Exception as exc:
+            logger.debug("[PDF] arXiv exact title search failed for '%s': %s", paper.title[:30], exc)
 
     if arxiv_id:
         arxiv_url = f"https://arxiv.org/pdf/{arxiv_id}"
@@ -269,7 +388,7 @@ async def extract_paper_passages(paper: Paper) -> list[PaperPassage]:
     Attempts all resolved PDF URLs in priority order before falling back to abstract.
     Guarantees that a paper ALWAYS has at least 1 passage.
     """
-    pdf_urls = resolve_paper_pdf_urls(paper)
+    pdf_urls = await resolve_paper_pdf_urls(paper)
     trials: list[str] = []
     for url in pdf_urls:
         try:
@@ -280,7 +399,7 @@ async def extract_paper_passages(paper: Paper) -> list[PaperPassage]:
                     paper.passages = passages
                     paper.passages_json = json.dumps([p.model_dump() for p in passages])
                     paper.pdfUrl = url
-                    setattr(paper, "is_abstract_only", False)
+                    paper.is_abstract_only = False
                     logger.info("[PDF] Extracted %d passages from '%s' via %s", len(passages), paper.title[:50], url)
                     return passages
                 else:
@@ -295,7 +414,7 @@ async def extract_paper_passages(paper: Paper) -> list[PaperPassage]:
     passages = create_abstract_fallback_passage(paper)
     paper.passages = passages
     paper.passages_json = json.dumps([p.model_dump() for p in passages])
-    setattr(paper, "is_abstract_only", True)
+    paper.is_abstract_only = True
     is_anchor = getattr(paper, "is_anchor", False)
     if is_anchor:
         logger.warning(

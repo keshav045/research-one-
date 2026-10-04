@@ -111,45 +111,47 @@ BENCHMARK_EXPECTED: dict[str, dict[str, Any]] = {
         ],
         "expected_dois": ["10.48550/arxiv.2112.10752"],
     },
-    "LoRA": {
-        "question": "Which paper introduced LoRA?",
-        "expected_arxiv": ["2106.09685"],
+    "DenseNet": {
+        "question": "Which paper introduced DenseNet?",
+        "expected_arxiv": ["1608.06993"],
         "expected_titles": [
-            "lora low rank adaptation of large language models",
+            "densely connected convolutional networks",
         ],
-        "expected_dois": ["10.48550/arxiv.2106.09685"],
+        "expected_dois": ["10.48550/arxiv.1608.06993"],
     },
-    "CLIP": {
-        "question": "Which paper introduced CLIP?",
-        "expected_arxiv": ["2103.00020"],
+    "Mask R-CNN": {
+        "question": "Which paper introduced Mask R-CNN?",
+        "expected_arxiv": ["1703.06870"],
         "expected_titles": [
-            "learning transferable visual models from natural language supervision",
+            "mask r cnn",
+            "mask rcnn",
         ],
-        "expected_dois": ["10.48550/arxiv.2103.00020"],
+        "expected_dois": ["10.48550/arxiv.1703.06870"],
     },
-    "PPO": {
-        "question": "Which paper introduced PPO?",
-        "expected_arxiv": ["1707.06347"],
+    "Graph Convolutional Networks": {
+        "question": "Which paper introduced Graph Convolutional Networks?",
+        "expected_arxiv": ["1609.02907"],
         "expected_titles": [
-            "proximal policy optimization algorithms",
+            "semi supervised classification with graph convolutional networks",
         ],
-        "expected_dois": ["10.48550/arxiv.1707.06347"],
+        "expected_dois": ["10.48550/arxiv.1609.02907"],
     },
-    "DDPM": {
-        "question": "Which paper introduced DDPM?",
-        "expected_arxiv": ["2006.11239"],
+    "T5": {
+        "question": "Which paper introduced T5?",
+        "expected_arxiv": ["1910.10683"],
         "expected_titles": [
-            "denoising diffusion probabilistic models",
+            "exploring the limits of transfer learning with a unified text to text transformer",
         ],
-        "expected_dois": ["10.48550/arxiv.2006.11239"],
+        "expected_dois": ["10.48550/arxiv.1910.10683"],
     },
-    "ResNet": {
-        "question": "Which paper introduced ResNet?",
-        "expected_arxiv": ["1512.03385"],
+    "YOLO": {
+        "question": "Which paper introduced YOLO?",
+        "expected_arxiv": ["1506.02640"],
         "expected_titles": [
-            "deep residual learning for image recognition",
+            "you only look once unified real time object detection",
+            "you only look once unified realtime object detection",
         ],
-        "expected_dois": ["10.48550/arxiv.1512.03385"],
+        "expected_dois": ["10.48550/arxiv.1506.02640"],
     },
 }
 
