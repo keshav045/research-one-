@@ -163,7 +163,7 @@ def extract_and_verify_evidence(
     vector_store: VectorStore,
     max_citations: int = 15,
     anchor_paper_id: Optional[str] = None,
-) -> Tuple[List[Claim], List[Citation], List[Dict]]:
+) -> Tuple[List[Claim], List[Citation], List[Dict], Dict[str, int]]:
     """
     Main Phase 5 pipeline (STEP 5):
     1. For each sub-question:
@@ -183,7 +183,13 @@ def extract_and_verify_evidence(
     """
     if not papers:
         logger.warning("[Evidence] No papers available for evidence extraction")
-        return [], [], []
+        return [], [], [], {
+            "captions": 0,
+            "author_notes": 0,
+            "references": 0,
+            "fragments_under_8_words": 0,
+            "length_out_of_bounds": 0,
+        }
 
     # Map paper_id to Paper object
     paper_map: Dict[str, Paper] = {p.id: p for p in papers}

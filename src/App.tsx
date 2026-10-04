@@ -173,7 +173,8 @@ export const App: React.FC = () => {
 
         setActiveInvestigation(fresh);
 
-        if (fresh.status === 'completed' || fresh.status === 'insufficient_evidence') {
+        const finalStatuses = ['completed', 'completed_with_warnings', 'insufficient_evidence', 'failed'];
+        if (finalStatuses.includes(fresh.status)) {
           // Fetch real papers from DB
           const jobPapers = await api.getJobPapers(fresh.id);
           const allPapers = jobPapers.length > 0 ? jobPapers : (fresh.report?.references || []);
@@ -222,7 +223,9 @@ export const App: React.FC = () => {
           setEvidenceList(derivedEvidence);
 
           setHistoryList(prev => [fresh, ...prev.filter(h => h.id !== fresh.id)]);
-          setCurrentTab('report');
+          if (fresh.status !== 'failed') {
+            setCurrentTab('report');
+          }
           setEvidencePanelOpen(false);
         }
       } catch (err) {

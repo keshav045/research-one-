@@ -122,10 +122,46 @@ class PaperRecord(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def get_authors(self) -> list[str]:
-        return json.loads(self.authors_json)
+        if not self.authors_json:
+            return []
+        try:
+            val = json.loads(self.authors_json)
+            if isinstance(val, list):
+                return [str(x) for x in val]
+            return [str(val)]
+        except Exception:
+            pass
+        # Fallback / migration for old str(list) format:
+        import ast
+        try:
+            val = ast.literal_eval(self.authors_json)
+            if isinstance(val, (list, tuple)):
+                return [str(x) for x in val]
+        except Exception:
+            pass
+        raw = self.authors_json.strip()
+        if raw.startswith("[") and raw.endswith("]"):
+            raw = raw[1:-1].strip()
+        return [item.strip().strip("'\"") for item in raw.split(",") if item.strip()]
 
     def get_passages(self) -> list[dict]:
-        return json.loads(self.passages_json) if self.passages_json else []
+        if not self.passages_json:
+            return []
+        try:
+            val = json.loads(self.passages_json)
+            if isinstance(val, list):
+                return val
+        except Exception:
+            pass
+        # Fallback / migration for old str(list_of_dicts) format:
+        import ast
+        try:
+            val = ast.literal_eval(self.passages_json)
+            if isinstance(val, list):
+                return val
+        except Exception:
+            pass
+        return []
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────

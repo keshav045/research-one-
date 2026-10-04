@@ -1,7 +1,7 @@
 """
 NLI Claim Verification Service — PyTorch & DeBERTa
 ==================================================
-Uses cross-encoder/nli-deberta-v3-small to verify whether
+Uses MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli to verify whether
 a source passage (premise) entails, contradicts, or is neutral toward
 each atomic claim (hypothesis).
 
@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import logging
 import re
-import uuid
 from typing import Optional, List, Tuple
 
 import torch
@@ -31,14 +30,14 @@ _tokenizer = None
 _model = None
 _device = None
 
-# Typical id2label for cross-encoder/nli-deberta-v3-small: {0: 'contradiction', 1: 'entailment', 2: 'neutral'}
+# Typical id2label for DeBERTa NLI: {0: 'contradiction', 1: 'entailment', 2: 'neutral'}
 
 
 def get_nli_components():
     """Lazy-load the tokenizer and sequence classification model on CUDA/CPU."""
     global _tokenizer, _model, _device
     if _model is None or _tokenizer is None:
-        model_name = settings.NLI_MODEL or "cross-encoder/nli-deberta-v3-small"
+        model_name = settings.NLI_MODEL or "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
         logger.info("[NLI] Loading model and tokenizer: %s", model_name)
         _tokenizer = AutoTokenizer.from_pretrained(model_name)
         _model = AutoModelForSequenceClassification.from_pretrained(model_name)
@@ -54,57 +53,6 @@ def get_nli_components():
         _model.to(_device)
         _model.eval()
     return _tokenizer, _model, _device
-
-
-# ─── Claim Decomposition ──────────────────────────────────────────────────────
-
-_SPLIT_PATTERNS = [
-    re.compile(r"\s*;\s*"),
-    re.compile(r"\s*,\s*and\s+(?:also\s+)?", re.IGNORECASE),
-    re.compile(r"\s*,\s*while\s+(?:simultaneously\s+)?", re.IGNORECASE),
-    re.compile(r"\s*,\s*with\s+(?:only\s+)?", re.IGNORECASE),
-    re.compile(r"\s*,\s*as well as\s+", re.IGNORECASE),
-    re.compile(r"\s*,\s*resulting in\s+", re.IGNORECASE),
-    re.compile(r"\s*,\s*leading to\s+", re.IGNORECASE),
-    re.compile(r"\s*,\s*whereas\s+", re.IGNORECASE),
-]
-
-
-def decompose_claim(claim: str) -> list[str]:
-    """Split a compound claim into independent atomic assertions."""
-    if not claim:
-        return []
-
-    clean = re.sub(r"\s+", " ", claim.strip())
-    parts = [clean]
-
-    for pattern in _SPLIT_PATTERNS:
-        next_parts: list[str] = []
-        for part in parts:
-            split = pattern.split(part)
-            next_parts.extend(s.strip() for s in split if s.strip())
-        parts = next_parts
-
-    if len(parts) == 1 and len(parts[0]) > 60:
-        mid_and = re.split(r"\s+and\s+(?=[a-z]+\s+(?:by|to|with|on|in)\b)", parts[0], flags=re.IGNORECASE)
-        if len(mid_and) > 1:
-            parts = mid_and
-
-    result: list[str] = []
-    seen: set[str] = set()
-    for part in parts:
-        part = part.strip().lstrip("and ").lstrip("while ").lstrip("with ")
-        if not part:
-            continue
-        part = part[0].upper() + part[1:]
-        if not part.endswith("."):
-            part += "."
-        if part not in seen:
-            seen.add(part)
-            result.append(part)
-
-    result = [p for p in result if len(p.split()) >= 5]
-    return result or [clean if clean.endswith(".") else clean + "."]
 
 
 # ─── NLI Model Inference ──────────────────────────────────────────────────────

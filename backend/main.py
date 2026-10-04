@@ -6,7 +6,7 @@ Full pipeline implementation:
   - PDF extraction: PyMuPDF
   - Embeddings: Sentence Transformers (all-MiniLM-L6-v2)
   - Vector DB: FAISS
-  - Claim verification: Hugging Face NLI (cross-encoder/nli-deberta-v3-small)
+  - Claim verification: Hugging Face NLI (MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli)
   - Report generation: Gemini API
   - Database: SQLite (default) → PostgreSQL (production)
 """

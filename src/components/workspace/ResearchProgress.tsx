@@ -12,12 +12,19 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({ investigatio
   const steps = investigation.pipeline || [];
   const completedCount = steps.filter(s => s.status === 'completed').length;
   const activeStep = steps.find(s => s.status === 'active');
-  const percentProgress = steps.length > 0 ? Math.round((completedCount / steps.length) * 100) : 10;
 
   const isCompleted = investigation.status === 'completed';
+  const isWarnings = investigation.status === 'completed_with_warnings';
+  const isFinished = isCompleted || isWarnings;
   const isInsufficient = investigation.status === 'insufficient_evidence';
   const isFailed = investigation.status === 'failed';
   const isRunning = investigation.status === 'in_progress';
+
+  const percentProgress = isFinished
+    ? 100
+    : steps.length > 0
+    ? Math.round((completedCount / steps.length) * 100)
+    : 10;
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-8">
@@ -35,6 +42,8 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({ investigatio
                     ? 'bg-amber-50 text-amber-700 border border-amber-200'
                     : isCompleted
                     ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : isWarnings
+                    ? 'bg-amber-50 text-amber-800 border border-amber-300'
                     : isInsufficient
                     ? 'bg-orange-50 text-orange-700 border border-orange-200'
                     : 'bg-red-50 text-red-700 border border-red-200'
@@ -42,6 +51,7 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({ investigatio
               >
                 {isRunning && <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />}
                 {isCompleted && <CheckCircle className="w-3.5 h-3.5" />}
+                {isWarnings && <AlertTriangle className="w-3.5 h-3.5" />}
                 {isInsufficient && <AlertTriangle className="w-3.5 h-3.5" />}
                 {isRunning ? 'Processing Pipeline' : investigation.status
                   .replace(/_/g, ' ')
@@ -53,7 +63,7 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({ investigatio
             </h2>
           </div>
 
-          {(isCompleted || isInsufficient) && onViewReport && (
+          {(isFinished || isInsufficient) && onViewReport && (
             <button
               onClick={onViewReport}
               className="shrink-0 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-black text-white text-xs font-semibold hover:bg-gray-800 transition-all shadow-sm"
@@ -97,7 +107,8 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({ investigatio
             <span>
               {isRunning
                 ? activeStep ? `Stage: ${activeStep.name}...` : 'Executing...'
-                : isCompleted ? (investigation.status === 'completed_with_warnings' ? 'Completed with Warnings' : 'Research Pipeline Completed')
+                : isCompleted ? 'Research Pipeline Completed'
+                : isWarnings ? 'Completed with Warnings'
                 : isInsufficient ? 'Evidence Gate Flagged Insufficient Evidence'
                 : 'Pipeline Failed'}
             </span>
@@ -106,12 +117,23 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({ investigatio
           <div className="h-2 w-full bg-gray-100 rounded-full overflow-hidden border border-gray-200">
             <div
               className={`h-full transition-all duration-500 rounded-full ${
-                isCompleted ? 'bg-emerald-600' : isInsufficient ? 'bg-orange-500' : isFailed ? 'bg-red-500' : 'bg-black'
+                isCompleted ? 'bg-emerald-600' : isWarnings ? 'bg-amber-500' : isInsufficient ? 'bg-orange-500' : isFailed ? 'bg-red-500' : 'bg-black'
               }`}
               style={{ width: `${percentProgress}%` }}
             />
           </div>
         </div>
+
+        {/* Notice for Warnings */}
+        {isWarnings && investigation.failure_reason && (
+          <div className="mt-4 p-4 rounded-lg border border-amber-200 bg-amber-50 text-amber-900 text-xs leading-relaxed">
+            <div className="flex items-center gap-2 font-bold mb-1 text-amber-800">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>Completed with Warnings</span>
+            </div>
+            <p className="text-amber-800">{investigation.failure_reason}</p>
+          </div>
+        )}
 
         {/* Notice for Insufficient Evidence — Phase 7: show real reason + counts */}
         {isInsufficient && (

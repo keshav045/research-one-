@@ -130,13 +130,9 @@ async def get_job_papers(
     records = db.query(PaperRecord).filter(PaperRecord.job_id == job_id).all()
     papers: list[Paper] = []
     for r in records:
-        import json
-        try:
-            authors = json.loads(r.authors_json)
-        except Exception:
-            authors = [r.authors_json]
+        authors = r.get_authors()
         passages = [
-            {"id": p["id"], "page": p["page"], "section": p["section"], "text": p["text"]}
+            {"id": p.get("id", ""), "page": p.get("page", 1), "section": p.get("section", ""), "text": p.get("text", "")}
             for p in r.get_passages()
         ]
         papers.append(

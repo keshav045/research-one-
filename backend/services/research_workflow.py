@@ -457,7 +457,7 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
                 id=f"{job_id}::{p.id}",
                 job_id=job_id,
                 title=p.title,
-                authors_json=str(p.authors).replace("'", '"'),
+                authors_json=json.dumps(p.authors),
                 publication_year=p.publicationYear,
                 journal_conference=p.journalConference,
                 doi=p.doi,
@@ -465,7 +465,7 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
                 abstract=p.abstract,
                 pdf_url=p.pdfUrl,
                 full_text=p.fullText[:50000] if p.fullText else None,
-                passages_json=str(passages_dicts).replace("'", '"') if passages_dicts else "[]",
+                passages_json=json.dumps(passages_dicts),
             )
             db.merge(rec)
         db.commit()
