@@ -17,6 +17,7 @@ Every stage records StageStat(name, started_at, duration_ms, in_count, out_count
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import time

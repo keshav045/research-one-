@@ -37,37 +37,41 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-# Stub heavy optional dependencies that are not needed for unit tests
+# Stub optional google dependencies if not installed
 for _stub_name in [
-    "faiss",
-    "sentence_transformers",
     "google",
     "google.generativeai",
 ]:
-    sys.modules.setdefault(_stub_name, types.ModuleType(_stub_name))
+    if _stub_name not in sys.modules:
+        try:
+            __import__(_stub_name)
+        except ImportError:
+            sys.modules.setdefault(_stub_name, types.ModuleType(_stub_name))
 
-# Stub config so tests work without a real .env file
-_cfg_mod = types.ModuleType("backend.config")
+# Ensure backend.config is available; only stub if importing fails
+if "backend.config" not in sys.modules:
+    try:
+        import backend.config  # noqa: F401
+    except Exception:
+        _cfg_mod = types.ModuleType("backend.config")
 
+        class _Settings:
+            GEMINI_API_KEY: str = ""           # blank => not configured
+            GEMINI_MODEL: str = "gemini-test"
+            NLI_MODEL: str = "cross-encoder/nli-deberta-v3-small"
+            EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
+            PDF_CACHE_DIR: str = "/tmp/pdf_cache"
+            DATABASE_URL: str = "sqlite:///./test.db"
+            SEMANTIC_SCHOLAR_API_KEY: str = ""
+            MAX_PDF_WORKERS: int = 2
+            DEPTH_COUNTS: dict = {"Quick": 6, "Standard": 12, "Deep": 24}
 
-class _Settings:
-    GEMINI_API_KEY: str = ""           # blank => not configured
-    GEMINI_MODEL: str = "gemini-test"
-    NLI_MODEL: str = "cross-encoder/nli-deberta-v3-small"
-    EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
-    PDF_CACHE_DIR: str = "/tmp/pdf_cache"
-    DATABASE_URL: str = "sqlite:///./test.db"
-    SEMANTIC_SCHOLAR_API_KEY: str = ""
-    MAX_PDF_WORKERS: int = 2
-    DEPTH_COUNTS: dict = {"Quick": 6, "Standard": 12, "Deep": 24}
+            @property
+            def is_gemini_configured(self) -> bool:
+                return bool(self.GEMINI_API_KEY) and self.GEMINI_API_KEY != "your_gemini_api_key_here"
 
-    @property
-    def is_gemini_configured(self) -> bool:
-        return bool(self.GEMINI_API_KEY) and self.GEMINI_API_KEY != "your_gemini_api_key_here"
-
-
-_cfg_mod.settings = _Settings()  # type: ignore[attr-defined]
-sys.modules["backend.config"] = _cfg_mod
+        _cfg_mod.settings = _Settings()  # type: ignore[attr-defined]
+        sys.modules["backend.config"] = _cfg_mod
 
 
 def _run_async(coro):
@@ -241,6 +245,11 @@ class TestGenerateSearchQueriesLLMPath:
 
     def _run_with_mock_gemini(self, mock_json_response: str) -> list[str]:
         """Helper: patch settings + genai, run generate_search_queries."""
+        from backend.config import settings
+
+        old_key = getattr(settings, "GEMINI_API_KEY", "")
+        settings.GEMINI_API_KEY = "fake-key-for-test"
+
         mock_response = MagicMock()
         mock_response.text = mock_json_response
 
@@ -262,7 +271,7 @@ class TestGenerateSearchQueriesLLMPath:
                     generate_search_queries(TRANSFORMER_QUESTION)
                 )
         finally:
-            _cfg_mod.settings.GEMINI_API_KEY = ""  # type: ignore
+            settings.GEMINI_API_KEY = old_key
             if "google" in sys.modules and old_google_genai is not None:
                 sys.modules["google"].generativeai = old_google_genai
 
@@ -288,7 +297,10 @@ class TestGenerateSearchQueriesLLMPath:
 
     def test_falls_back_on_invalid_json(self):
         """If the LLM returns garbage JSON the fallback keyword query is used."""
-        _cfg_mod.settings.GEMINI_API_KEY = "fake-key-for-test"  # type: ignore
+        from backend.config import settings
+
+        old_key = getattr(settings, "GEMINI_API_KEY", "")
+        settings.GEMINI_API_KEY = "fake-key-for-test"
 
         mock_model = MagicMock()
         mock_model.generate_content.side_effect = ValueError("JSON parse error")
@@ -304,7 +316,7 @@ class TestGenerateSearchQueriesLLMPath:
                     generate_search_queries(TRANSFORMER_QUESTION)
                 )
         finally:
-            _cfg_mod.settings.GEMINI_API_KEY = ""  # type: ignore
+            settings.GEMINI_API_KEY = old_key
 
         # Must still return at least one usable query (keyword fallback)
         assert isinstance(result, list) and len(result) >= 1

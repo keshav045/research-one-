@@ -36,35 +36,37 @@ for _stub_name in ["faiss", "sentence_transformers", "google", "google.generativ
         except ImportError:
             sys.modules[_stub_name] = types.ModuleType(_stub_name)
 
-# Stub backend.config BEFORE importing any backend module
-_cfg_mod = types.ModuleType("backend.config")
+# Ensure backend.config is available without overwriting real config
+if "backend.config" not in sys.modules:
+    try:
+        import backend.config  # noqa: F401
+    except Exception:
+        _cfg_mod = types.ModuleType("backend.config")
 
+        class _FakeSettings:
+            LLM_PROVIDER = "local"
+            LOCAL_LLM_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+            LOCAL_LLM_MAX_TOKENS = 512
+            OLLAMA_URL = "http://localhost:11434"
+            OLLAMA_MODEL = "qwen2.5:3b-instruct"
+            QWEN_API_KEY = ""
+            GEMINI_API_KEY = ""
+            SEMANTIC_SCHOLAR_API_KEY = ""
+            NLI_MODEL = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+            NLI_DEVICE = "cpu"
+            NLI_ENTAIL_THRESHOLD = 0.80
+            EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+            RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            DEPTH_COUNTS = {"Quick": 6, "Standard": 12, "Deep": 24}
+            DATABASE_URL = "sqlite:///./researchlens_test.db"
+            PDF_CACHE_DIR = "./pdf_cache"
+            MAX_PDF_WORKERS = 4
+            is_gemini_configured = False
+            is_qwen_configured = False
 
-class _FakeSettings:
-    LLM_PROVIDER = "local"
-    LOCAL_LLM_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-    LOCAL_LLM_MAX_TOKENS = 512
-    OLLAMA_URL = "http://localhost:11434"
-    OLLAMA_MODEL = "qwen2.5:3b-instruct"
-    QWEN_API_KEY = ""
-    GEMINI_API_KEY = ""
-    SEMANTIC_SCHOLAR_API_KEY = ""
-    NLI_MODEL = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
-    NLI_DEVICE = "cpu"
-    NLI_ENTAIL_THRESHOLD = 0.80
-    EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
-    RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    DEPTH_COUNTS = {"Quick": 6, "Standard": 12, "Deep": 24}
-    DATABASE_URL = "sqlite:///./researchlens_test.db"
-    PDF_CACHE_DIR = "./pdf_cache"
-    MAX_PDF_WORKERS = 4
-    is_gemini_configured = False
-    is_qwen_configured = False
-
-
-_cfg_mod.settings = _FakeSettings()
-_cfg_mod.get_settings = lambda: _FakeSettings()
-sys.modules["backend.config"] = _cfg_mod
+        _cfg_mod.settings = _FakeSettings()
+        _cfg_mod.get_settings = lambda: _FakeSettings()
+        sys.modules["backend.config"] = _cfg_mod
 
 
 # ---------------------------------------------------------------------------
@@ -309,10 +311,11 @@ class TestSemanticScholarRetry:
                 },
             )
 
+        from backend.config import settings
+        monkeypatch.setattr(settings, "SEMANTIC_SCHOLAR_API_KEY", "test-key")
         monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
 
-        fast_s2 = _fetch_s2_with_retry.retry_with(wait=lambda *args, **kwargs: 0)
-        papers = await fast_s2("transformer", 5, {})
+        papers = await _fetch_s2_with_retry("transformer", 5, {})
         assert len(papers) == 1
         assert "Attention Is All You Need" in papers[0].title
         assert calls == 2
@@ -344,9 +347,6 @@ class TestSemanticScholarRetry:
             "_get_cached_response",
             lambda *args: None,
         )
-
-        fast_s2 = paper_retrieval._fetch_s2_with_retry.retry_with(wait=lambda *args, **kwargs: 0)
-        monkeypatch.setattr(paper_retrieval, "_fetch_s2_with_retry", fast_s2)
 
         results = await _fetch_semantic_scholar_query("never_cached_query_xyz", 5)
         assert results == []

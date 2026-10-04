@@ -46,23 +46,27 @@ for _s in [
 
 # numpy IS installed — do NOT stub it.
 
-# ── Stub the config module so it doesn't fail on missing env vars ─────────────
-_cfg = types.ModuleType("backend.config")
+# ── Stub the config module only if real config cannot be imported ─────────────
+if "backend.config" not in sys.modules:
+    try:
+        import backend.config  # noqa: F401
+    except Exception:
+        _cfg = types.ModuleType("backend.config")
 
-class _Settings:
-    GEMINI_API_KEY: str = "test-key"
-    GEMINI_MODEL: str = "gemini-test"
-    NLI_MODEL: str = "cross-encoder/nli-deberta-v3-small"
-    EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
-    PDF_CACHE_DIR: str = "/tmp/pdf_cache"
-    DATABASE_URL: str = "sqlite:///./test.db"
-    SEMANTIC_SCHOLAR_API_KEY: str = ""
-    MAX_PDF_WORKERS: int = 2
-    DEPTH_COUNTS: dict = {"Quick": 6, "Standard": 12, "Deep": 24}
-    is_gemini_configured: bool = True
+        class _Settings:
+            GEMINI_API_KEY: str = "test-key"
+            GEMINI_MODEL: str = "gemini-test"
+            NLI_MODEL: str = "cross-encoder/nli-deberta-v3-small"
+            EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
+            PDF_CACHE_DIR: str = "/tmp/pdf_cache"
+            DATABASE_URL: str = "sqlite:///./test.db"
+            SEMANTIC_SCHOLAR_API_KEY: str = ""
+            MAX_PDF_WORKERS: int = 2
+            DEPTH_COUNTS: dict = {"Quick": 6, "Standard": 12, "Deep": 24}
+            is_gemini_configured: bool = True
 
-_cfg.settings = _Settings()  # type: ignore[attr-defined]
-sys.modules["backend.config"] = _cfg
+        _cfg.settings = _Settings()  # type: ignore[attr-defined]
+        sys.modules["backend.config"] = _cfg
 
 from backend.models.schemas import (  # noqa: E402
     Citation,
