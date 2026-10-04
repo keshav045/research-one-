@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     # Local LLM (HuggingFace — no API key required, heavy download)
     LOCAL_LLM_MODEL: str = "Qwen/Qwen2.5-0.5B-Instruct"
     LOCAL_LLM_MAX_TOKENS: int = 1536
+    LLM_FALLBACK_LOCAL: bool = False
 
     # Qwen (Alibaba DashScope — OpenAI-compatible)
     QWEN_API_KEY: str = ""

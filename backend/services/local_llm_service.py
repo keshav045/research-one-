@@ -106,48 +106,87 @@ async def _call_local(prompt: str, max_tokens: int = 512) -> str:
     return await loop.run_in_executor(None, _run_local_text_generation, prompt, max_tokens)
 
 
+_ollama_first_call = True
+
+
 async def _call_ollama(prompt: str, max_tokens: int = 512) -> str:
     """Call Ollama REST API for LLM text generation."""
+    global _ollama_first_call
+    timeout = 180.0 if _ollama_first_call else 45.0
+    _ollama_first_call = False
+
     url = f"{settings.OLLAMA_URL}/api/generate"
     payload = {
         "model": settings.OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
+        "keep_alive": "10m",
         "options": {
             "temperature": 0.2,
             "num_predict": max_tokens,
         },
     }
     try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
             return data.get("response", "").strip()
     except Exception as exc:
-        logger.debug("[Ollama] Request failed: %s", exc)
+        logger.warning("[Ollama] Request failed: %s", exc)
         return ""
 
 
-async def _call_llm(prompt: str, max_tokens: int = 512) -> str:
-    """Unified LLM caller routing to Ollama, cloud, or local HF model."""
+def get_provider_model(provider: str) -> str:
+    """Return model name associated with the provider."""
+    prov = (provider or "").lower()
+    if "ollama" in prov:
+        return settings.OLLAMA_MODEL
+    elif "local" in prov:
+        return settings.LOCAL_LLM_MODEL
+    elif "gemini" in prov:
+        return settings.GEMINI_MODEL
+    elif "qwen" in prov:
+        return settings.QWEN_MODEL
+    return "none"
+
+
+async def _call_llm(prompt: str, max_tokens: int = 512) -> tuple[str, str]:
+    """Unified LLM caller routing to Ollama, cloud, or local HF model.
+    Returns (text, provider_used).
+    """
     provider = settings.LLM_PROVIDER.lower()
     if provider == "ollama":
         res = await _call_ollama(prompt, max_tokens)
         if res:
-            return res
-        return await _call_local(prompt, max_tokens)
+            return res, "ollama"
+        if getattr(settings, "LLM_FALLBACK_LOCAL", False):
+            logger.warning("[LLM] Ollama call failed. Falling back to local HF model (LLM_FALLBACK_LOCAL=True).")
+            res_local = await _call_local(prompt, max_tokens)
+            return res_local, "local (fallback)"
+        else:
+            logger.warning("[LLM] Ollama call failed. Local fallback disabled (LLM_FALLBACK_LOCAL=False).")
+            return "", "none"
     elif provider in ("qwen", "gemini"):
         try:
             from .gemini_service import generate_text_simple
             res = await generate_text_simple(prompt, max_tokens)
             if res:
-                return res
+                return res, provider
         except Exception as exc:
             logger.warning("[LLM] Cloud provider failed: %s", exc)
-        return await _call_local(prompt, max_tokens)
+        if getattr(settings, "LLM_FALLBACK_LOCAL", False):
+            logger.warning("[LLM] Cloud provider failed. Falling back to local HF model (LLM_FALLBACK_LOCAL=True).")
+            res_local = await _call_local(prompt, max_tokens)
+            return res_local, "local (fallback)"
+        else:
+            logger.warning("[LLM] Cloud provider failed. Local fallback disabled (LLM_FALLBACK_LOCAL=False).")
+            return "", "none"
+    elif provider == "local":
+        res = await _call_local(prompt, max_tokens)
+        return res, "local"
     else:
-        return await _call_local(prompt, max_tokens)
+        return "", "none"
 
 
 # ─── Step 6A: Answer Generation ───────────────────────────────────────────────
@@ -177,14 +216,14 @@ async def generate_plain_answer(
     anchor_paper: Optional[Paper] = None,
     anchor_confidence: str = "high",
     alternate_paper: Optional[Paper] = None,
-) -> str:
+) -> tuple[str, str, str]:
     """
     Step 6A Plain-Text Answer Generation:
     - Input: verified claims with exact source paper metadata (never from LLM).
-    - Output: plain text claim sentences with [n] badges (does not include the first metadata sentence).
+    - Output: (plain_text_claims, provider_used, model_name).
     """
     if not verified_citations:
-        return ""
+        return "", "none", "none"
 
     # Format claims with strictly verified metadata
     claims_context = []
@@ -205,12 +244,15 @@ async def generate_plain_answer(
         "3. Output PLAIN TEXT ONLY. Do not output markdown titles, lists, or JSON."
     )
 
+    provider_used = "none"
+    model_name = "none"
     try:
-        raw_output = await _call_llm(prompt, max_tokens=350)
+        raw_output, provider_used = await _call_llm(prompt, max_tokens=350)
         clean = raw_output.strip().replace("```", "").strip()
         # Verify LLM respected [n] citation markers and did not produce empty response
         if clean and re.search(r"\[\d+\]", clean) and len(clean.split()) >= 15:
-            return clean
+            model_name = get_provider_model(provider_used)
+            return clean, provider_used, model_name
     except Exception as exc:
         logger.info("[LocalLLM] Answer generation fallback triggered: %s", exc)
 
@@ -220,7 +262,8 @@ async def generate_plain_answer(
         text = c.claim.strip().rstrip(".")
         body_sentences.append(f"{text} [{c.badgeNumber}].")
 
-    return " ".join(body_sentences)
+    fb_provider = "deterministic_fallback" if not provider_used or provider_used == "none" else f"{provider_used} (failed)"
+    return " ".join(body_sentences), fb_provider, "none"
 
 
 # ─── Structured Synthesis in Python (No Invented Data) ─────────────────────────
@@ -350,6 +393,7 @@ async def synthesize_report(
     anchor_rule: str = "none",
     stage_stats: Optional[list[Any]] = None,
     retrieval_warnings: Optional[list[str]] = None,
+    debug_info: Optional[dict[str, Any]] = None,
 ) -> tuple[ResearchReport, float, list[dict[str, Any]]]:
     """
     Main Step 6 Report Synthesis:
@@ -372,11 +416,18 @@ async def synthesize_report(
             uncertainty_note = f"Source paper selection is marked uncertain for '{anchor_paper.title}'."
 
     # 1. Generate plain-text claim sentences
-    raw_claims = await generate_plain_answer(
+    raw_claims, writer_provider, writer_model = await generate_plain_answer(
         question=question,
         verified_citations=citations,
         anchor_paper=anchor_paper,
     )
+    if debug_info is not None:
+        debug_info["writer_provider"] = writer_provider
+        debug_info["writer_model"] = writer_model
+        if "fallback" in str(writer_provider).lower():
+            warn_msg = "Writer used local fallback model"
+            if warn_msg not in debug_info.setdefault("llm_warnings", []):
+                debug_info["llm_warnings"].append(warn_msg)
 
     # 2. Answer-Level NLI Verification (Step 6B)
     verified_answer, integrity, verified_details, removed_details = verify_answer_sentences(
@@ -403,6 +454,10 @@ async def synthesize_report(
         removed_sentences=removed_details,
         retrieval_warnings=retrieval_warnings,
     )
+    if debug_info and debug_info.get("llm_warnings"):
+        for w in debug_info["llm_warnings"]:
+            if w not in limitations:
+                limitations.append(w)
     if uncertainty_note and uncertainty_note not in limitations:
         limitations.insert(0, uncertainty_note)
 
@@ -441,6 +496,8 @@ async def synthesize_report(
         warning_notes.append(f"{len(removed_details)} claim sentence(s) removed due to lack of verifiable evidence.")
     if retrieval_warnings:
         warning_notes.extend(retrieval_warnings)
+    if debug_info and debug_info.get("llm_warnings"):
+        warning_notes.extend(debug_info["llm_warnings"])
 
     if warning_notes:
         conclusion_parts.append(f"Warnings: {'; '.join(warning_notes)}.")

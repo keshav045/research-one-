@@ -63,6 +63,42 @@ async def lifespan(app: FastAPI):
     # Ensure PDF cache directory exists
     Path(settings.PDF_CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
+    # ── Model Warmups ───────────────────────────────────────────────────────────
+    import time
+
+    t0 = time.time()
+    try:
+        from .services.embeddings import get_model as get_embedding_model
+        get_embedding_model()
+        logger.info("[Startup] Embedding model warmed up in %.2fs", time.time() - t0)
+    except Exception as exc:
+        logger.warning("[Startup] Embedding model warmup failed: %s", exc)
+
+    t0 = time.time()
+    try:
+        from .services.ranker import get_reranker
+        get_reranker()
+        logger.info("[Startup] Reranker model warmed up in %.2fs", time.time() - t0)
+    except Exception as exc:
+        logger.warning("[Startup] Reranker model warmup failed: %s", exc)
+
+    t0 = time.time()
+    try:
+        from .services.nli_verifier import get_nli_components
+        get_nli_components()
+        logger.info("[Startup] NLI model warmed up in %.2fs", time.time() - t0)
+    except Exception as exc:
+        logger.warning("[Startup] NLI model warmup failed: %s", exc)
+
+    if settings.LLM_PROVIDER.lower() == "ollama":
+        t0 = time.time()
+        try:
+            from .services.local_llm_service import _call_ollama
+            await _call_ollama("warmup", max_tokens=1)
+            logger.info("[Startup] Ollama 1-token warmup call completed in %.2fs", time.time() - t0)
+        except Exception as exc:
+            logger.warning("[Startup] Ollama warmup failed: %s", exc)
+
     yield
 
     logger.info("=== ResearchLens Backend shutting down ===")

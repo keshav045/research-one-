@@ -141,11 +141,12 @@ async def plan_research_queries(question: str) -> QueryPlan:
     )
 
     used_llm = False
+    planner_provider = "none"
+    planner_model = "none"
     try:
-        from .local_llm_service import _call_llm, _call_local
-        raw = await _call_llm(prompt, max_tokens=300)
-        if not raw or not raw.strip():
-            raw = await _call_local(prompt, max_tokens=300)
+        from .local_llm_service import _call_llm, get_provider_model
+        raw, planner_provider = await _call_llm(prompt, max_tokens=300)
+        planner_model = get_provider_model(planner_provider) if raw else "none"
 
         if not raw or not raw.strip():
             logger.warning("[QueryPlanner] Fallback plan used: LLM returned empty reply")
@@ -188,6 +189,8 @@ async def plan_research_queries(question: str) -> QueryPlan:
     from .ranker import validate_title_guesses
     plan["title_guesses"] = validate_title_guesses(plan.get("title_guesses", []))
     plan["plan_source"] = "llm" if used_llm else "fallback"
+    plan["planner_provider"] = planner_provider if used_llm else "none"
+    plan["planner_model"] = planner_model if used_llm else "none"
     # Ensure expected_titles alias is present
     plan["expected_titles"] = plan.get("title_guesses", [])
     logger.info(

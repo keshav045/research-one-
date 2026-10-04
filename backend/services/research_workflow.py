@@ -305,6 +305,8 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         logger.info("[Pipeline] Stage 1: Query Planning for '%s'", question[:80])
         plan = await plan_queries(question)
         debug_info["plan"] = plan
+        debug_info["planner_provider"] = plan.get("planner_provider", "none")
+        debug_info["planner_model"] = plan.get("planner_model", "none")
         q_type = plan.get("question_type", "literature_review")
         queries = plan.get("queries", [question])
         title_guesses = plan.get("expected_titles", [])
@@ -541,8 +543,14 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
             anchor_rule=anchor_debug.get("anchor_rule", "none"),
             stage_stats=stage_stats,
             retrieval_warnings=debug_info.get("retrieval_errors"),
+            debug_info=debug_info,
         )
         record_stage("report_synthesis", t0, in_count=len(citations), out_count=1)
+
+        debug_info.setdefault("planner_provider", "none")
+        debug_info.setdefault("planner_model", "none")
+        debug_info.setdefault("writer_provider", "none")
+        debug_info.setdefault("writer_model", "none")
 
         # Step 6C: Investigation Status Determination
         anchor_is_abstract_only = getattr(anchor_paper, "is_abstract_only", False) if anchor_paper else False
@@ -563,6 +571,17 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
             candidate_count=len(enriched_papers),
             passages_total=job.passages_total,
         )
+
+        # Check for LLM fallback warnings and make visible on job
+        planner_prov = str(debug_info.get("planner_provider", "")).lower()
+        writer_prov = str(debug_info.get("writer_provider", "")).lower()
+        if "fallback" in planner_prov or "fallback" in writer_prov:
+            fb_warn = "LLM fallback triggered: fell back to local model."
+            if fb_warn not in status_reasons:
+                status_reasons.append(fb_warn)
+            if status == "completed":
+                status = "completed_with_warnings"
+
         job.status = status
         job.failure_reason = "; ".join(status_reasons) if status_reasons else None
 
