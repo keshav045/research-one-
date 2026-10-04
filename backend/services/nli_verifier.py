@@ -23,6 +23,7 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 from ..models.schemas import AtomicClaimVerification, EntailmentVerdict
 from ..config import settings
+from .text_utils import split_into_sentences
 
 logger = logging.getLogger(__name__)
 
@@ -298,8 +299,7 @@ def _extract_premise_for_citation(cit: Any) -> str:
     if not passage:
         return getattr(cit, "claim", "") or getattr(cit, "highlightSentence", "") or ""
 
-    raw_sents = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", passage.strip())
-    sents = [s.strip() for s in raw_sents if s.strip()]
+    sents = split_into_sentences(passage)
     if not sents:
         return passage
 
@@ -324,29 +324,50 @@ def verify_answer_sentences(
     answer_text: str,
     citations: list[Any],
     anchor_paper: Optional[Any] = None,
+    first_sentence: Optional[str] = None,
 ) -> tuple[str, float, list[dict[str, Any]], list[dict[str, Any]]]:
     """
     Step 6B Answer-level NLI:
-    - For each answer sentence:
-      Hypothesis = the sentence.
-      Premise = cited claim sentences plus one neighboring sentence on each side from source passage.
-    - Verified if entailment >= NLI_ENTAIL_THRESHOLD (config, 0.80).
-    - Unsupported sentences are REMOVED from the final answer and logged in debug data.
-    - Citation integrity = verified sentences / answer sentences.
+    - First sentence (title, authors, year) is marked type=metadata, not run through NLI,
+      and not counted in the integrity denominator.
+    - Evaluates substantive claim sentences against cited passage premises.
+    - Integrity = verified claim sentences / claim sentences.
     - Returns (verified_answer_text, integrity_ratio, verified_details, removed_details).
     """
     if not answer_text or not answer_text.strip():
+        if first_sentence:
+            return first_sentence, 0.0, [{"sentence": first_sentence, "type": "metadata", "status": "retained"}], []
         return "", 0.0, [], []
 
     badge_map = {getattr(c, "badgeNumber", 0): c for c in citations}
-    raw_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\"'])", answer_text.strip()) if s.strip()]
+    raw_sentences = split_into_sentences(answer_text)
     if not raw_sentences:
+        if first_sentence:
+            return first_sentence, 0.0, [{"sentence": first_sentence, "type": "metadata", "status": "retained"}], []
         return "", 0.0, [], []
+
+    # Step 2a: Identify the first sentence (title, authors, year)
+    metadata_sentence = None
+    if first_sentence:
+        if raw_sentences and raw_sentences[0].strip() == first_sentence.strip():
+            metadata_sentence = raw_sentences.pop(0)
+        else:
+            metadata_sentence = first_sentence.strip()
+    elif raw_sentences:
+        first = raw_sentences[0]
+        # Detect if first sentence is introductory metadata without citations
+        if not re.search(r"\[\d+\]", first) and any(
+            kw in first.lower() for kw in ("introduced by", "proposed by", "was introduced", "introduced the", "introduces the", "no definitive foundational")
+        ):
+            metadata_sentence = raw_sentences.pop(0)
+
+    # Claim sentences are the substantive assertion sentences (denominator of integrity)
+    claim_sentences = list(raw_sentences)
 
     threshold = getattr(settings, "NLI_ENTAIL_THRESHOLD", 0.80)
     pairs_to_eval: list[tuple[str, str, str, list[int]]] = []
 
-    for sent in raw_sentences:
+    for sent in claim_sentences:
         badges = [int(m) for m in re.findall(r"\[(\d+)\]", sent)]
         if badges:
             premise_parts = []
@@ -356,30 +377,32 @@ def verify_answer_sentences(
                     premise_parts.append(_extract_premise_for_citation(c))
             premise_text = " ".join(premise_parts) if premise_parts else ""
         else:
-            # Check if sentence is introductory (names source paper or uncertain source)
-            is_intro = any(kw in sent.lower() for kw in ("source paper is", "was introduced by", "proposed by", "introduced the", "introduces the"))
-            if is_intro and anchor_paper:
-                premise_text = f"{anchor_paper.title}. {getattr(anchor_paper, 'abstract', '') or ''}"
-            else:
-                premise_text = ""
+            premise_text = ""
 
-        # Hypothesis strips bracketed markers for clean evaluation
         clean_hypothesis = re.sub(r"\[\d+(?:,\s*\d+)*\]", "", sent).strip()
         pairs_to_eval.append((premise_text, clean_hypothesis, sent, badges))
 
-    verified_sentences: list[str] = []
+    verified_claim_sentences: list[str] = []
     verified_details: list[dict[str, Any]] = []
     removed_details: list[dict[str, Any]] = []
+
+    if metadata_sentence:
+        verified_details.append({
+            "sentence": metadata_sentence,
+            "type": "metadata",
+            "status": "retained",
+        })
 
     for premise, hypothesis, original_sent, badges in pairs_to_eval:
         if not premise:
             removed_details.append({
                 "sentence": original_sent,
+                "type": "claim",
                 "reason": "Missing supporting citation badges or ground-truth premise",
                 "entailment_score": 0.0,
                 "verdict": "UNSUPPORTED",
             })
-            logger.info("[NLI-Answer] Removed uncited/unsupported sentence: '%s'", original_sent[:80])
+            logger.info("[NLI-Answer] Removed uncited/unsupported claim sentence: '%s'", original_sent[:80])
             continue
 
         try:
@@ -392,9 +415,10 @@ def verify_answer_sentences(
             entail_score = 0.50 if verdict == EntailmentVerdict.NEUTRAL else 0.0
 
         if verdict == EntailmentVerdict.ENTAILS and confidence >= threshold:
-            verified_sentences.append(original_sent)
+            verified_claim_sentences.append(original_sent)
             verified_details.append({
                 "sentence": original_sent,
+                "type": "claim",
                 "entailment_score": confidence,
                 "verdict": "VERIFIED",
                 "badges": badges,
@@ -403,6 +427,7 @@ def verify_answer_sentences(
         else:
             removed_details.append({
                 "sentence": original_sent,
+                "type": "claim",
                 "reason": f"Entailment score {confidence:.3f} below threshold {threshold:.2f} ({verdict.value if hasattr(verdict, 'value') else verdict})",
                 "entailment_score": confidence,
                 "verdict": verdict.value if hasattr(verdict, "value") else str(verdict),
@@ -413,8 +438,15 @@ def verify_answer_sentences(
                 original_sent[:80], verdict, confidence
             )
 
-    total_sentences = len(raw_sentences)
-    integrity = (len(verified_sentences) / total_sentences) if total_sentences > 0 else 0.0
-    verified_answer_text = " ".join(verified_sentences)
+    # Integrity = verified claim sentences / claim sentences
+    total_claim_sentences = len(claim_sentences)
+    integrity = (len(verified_claim_sentences) / total_claim_sentences) if total_claim_sentences > 0 else 0.0
+
+    if metadata_sentence and verified_claim_sentences:
+        verified_answer_text = f"{metadata_sentence} " + " ".join(verified_claim_sentences)
+    elif metadata_sentence:
+        verified_answer_text = metadata_sentence
+    else:
+        verified_answer_text = " ".join(verified_claim_sentences)
 
     return verified_answer_text, round(integrity, 3), verified_details, removed_details

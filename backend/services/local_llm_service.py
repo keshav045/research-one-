@@ -158,12 +158,8 @@ def _format_first_sentence(
     anchor_confidence: str = "high",
     alternate_paper: Optional[Paper] = None,
 ) -> str:
-    """Formulate mandatory first sentence naming source paper or indicating uncertainty."""
-    if anchor_confidence == "uncertain" and alternate_paper and anchor_paper:
-        y1 = getattr(anchor_paper, "publicationYear", 2024) or 2024
-        y2 = getattr(alternate_paper, "publicationYear", 2024) or 2024
-        return f"The source paper is uncertain: '{anchor_paper.title}' ({y1}) or '{alternate_paper.title}' ({y2})."
-    elif anchor_paper:
+    """Formulate mandatory first sentence naming source paper (title, authors, year) deterministically in Python."""
+    if anchor_paper:
         year = getattr(anchor_paper, "publicationYear", 2024) or 2024
         authors_list = getattr(anchor_paper, "authors", []) or ["Unknown"]
         if len(authors_list) > 3:
@@ -185,12 +181,10 @@ async def generate_plain_answer(
     """
     Step 6A Plain-Text Answer Generation:
     - Input: verified claims with exact source paper metadata (never from LLM).
-    - Output: plain text, 3-6 sentences with [n] badges.
+    - Output: plain text claim sentences with [n] badges (does not include the first metadata sentence).
     """
-    first_sentence = _format_first_sentence(question, anchor_paper, anchor_confidence, alternate_paper)
-
     if not verified_citations:
-        return first_sentence
+        return ""
 
     # Format claims with strictly verified metadata
     claims_context = []
@@ -204,33 +198,29 @@ async def generate_plain_answer(
         f"Research Question: {question}\n\n"
         f"Verified Source Facts:\n{claims_block}\n\n"
         "Instructions:\n"
-        "Write a concise academic answer of 3 to 6 sentences directly answering the question.\n"
+        "Write a concise academic answer of 2 to 5 sentences directly answering the question.\n"
         "Strict Requirements:\n"
-        f"1. The first sentence MUST be: \"{first_sentence}\"\n"
-        "2. Use ONLY the given verified source facts. Add NO new facts, dates, names, or numbers.\n"
-        "3. Preserve the bracketed citation markers [n] directly adjacent to each asserted fact.\n"
-        "4. Output PLAIN TEXT ONLY. Do not output markdown titles, lists, or JSON."
+        "1. Use ONLY the given verified source facts. Add NO new facts, dates, names, or numbers.\n"
+        "2. Preserve the bracketed citation markers [n] directly adjacent to each asserted fact.\n"
+        "3. Output PLAIN TEXT ONLY. Do not output markdown titles, lists, or JSON."
     )
 
     try:
         raw_output = await _call_llm(prompt, max_tokens=350)
         clean = raw_output.strip().replace("```", "").strip()
         # Verify LLM respected [n] citation markers and did not produce empty response
-        if clean and re.search(r"\[\d+\]", clean) and len(clean.split()) >= 25:
-            # Ensure the first sentence matches required structure
-            if not clean.startswith(first_sentence[:30]):
-                clean = f"{first_sentence} {clean}"
+        if clean and re.search(r"\[\d+\]", clean) and len(clean.split()) >= 15:
             return clean
     except Exception as exc:
         logger.info("[LocalLLM] Answer generation fallback triggered: %s", exc)
 
-    # Deterministic fallback: exactly 3-6 sentences with real [n] markers
+    # Deterministic fallback: sentences with real [n] markers
     body_sentences = []
     for c in verified_citations[:5]:
         text = c.claim.strip().rstrip(".")
         body_sentences.append(f"{text} [{c.badgeNumber}].")
 
-    return f"{first_sentence} " + " ".join(body_sentences)
+    return " ".join(body_sentences)
 
 
 # ─── Structured Synthesis in Python (No Invented Data) ─────────────────────────
@@ -251,7 +241,6 @@ def build_methodology_from_stats(
     src_summary = ", ".join(f"{k} ({v})" for k, v in sources_count.items()) if sources_count else "None"
 
     total_passages = sum(len(getattr(p, "passages", []) or []) for p in papers)
-    thresh = getattr(settings, "NLI_ENTAIL_THRESHOLD", 0.80)
 
     lines = [
         "### Empirical Research Protocol & Methodological Audit",
@@ -259,7 +248,7 @@ def build_methodology_from_stats(
         f"- **Corpus Ingestion**: Queried academic open access indices; ingested {len(papers)} candidate papers across {src_summary}.",
         f"- **Anchor Identification**: Selected foundational anchor paper via rule `{anchor_rule}` (confidence: `{anchor_confidence}`).",
         f"- **Full-Text Passage Extraction**: Extracted and indexed {total_passages} verbatim passages via PyMuPDF windowed segmentation.",
-        f"- **Atomic Evidence Attestation**: Verified atomic assertions against source passages using cross-encoder NLI (threshold >= {thresh:.2f}).",
+        f"- **Evidence Extraction & Source Match**: Verified candidate assertions against verbatim source passages via source match.",
         f"- **Answer Verification & Citation Integrity**: Synthesized prose was audited sentence-by-sentence via answer-level NLI, achieving {integrity:.1%} citation integrity.",
     ]
     return "\n".join(lines)
@@ -367,26 +356,33 @@ async def synthesize_report(
     3. Builds methodology, references, and limitations deterministically from metadata.
     4. Returns (report, citation_integrity, removed_sentences).
     """
-    # 1. Generate plain-text answer
-    raw_answer = await generate_plain_answer(
+    # Build first sentence (title, authors, year) deterministically in Python
+    first_sentence = _format_first_sentence(question, anchor_paper)
+
+    # Any 'source paper uncertain' note is a report field and status reason only
+    uncertainty_note = ""
+    if anchor_confidence == "uncertain":
+        if anchor_paper and alternate_paper:
+            y1 = getattr(anchor_paper, "publicationYear", 2024) or 2024
+            y2 = getattr(alternate_paper, "publicationYear", 2024) or 2024
+            uncertainty_note = f"Source paper uncertain: '{anchor_paper.title}' ({y1}) or '{alternate_paper.title}' ({y2})."
+        elif anchor_paper:
+            uncertainty_note = f"Source paper selection is marked uncertain for '{anchor_paper.title}'."
+
+    # 1. Generate plain-text claim sentences
+    raw_claims = await generate_plain_answer(
         question=question,
         verified_citations=citations,
         anchor_paper=anchor_paper,
-        anchor_confidence=anchor_confidence,
-        alternate_paper=alternate_paper,
     )
 
     # 2. Answer-Level NLI Verification (Step 6B)
     verified_answer, integrity, verified_details, removed_details = verify_answer_sentences(
-        answer_text=raw_answer,
+        answer_text=raw_claims,
         citations=citations,
         anchor_paper=anchor_paper,
+        first_sentence=first_sentence,
     )
-
-    if not verified_answer.strip():
-        # If all sentences were pruned, retain first introductory sentence
-        first_sentence = _format_first_sentence(question, anchor_paper, anchor_confidence, alternate_paper)
-        verified_answer = first_sentence
 
     # 3. Build structured sections from metadata
     methodology = build_methodology_from_stats(
@@ -405,6 +401,8 @@ async def synthesize_report(
         removed_sentences=removed_details,
         retrieval_warnings=retrieval_warnings,
     )
+    if uncertainty_note and uncertainty_note not in limitations:
+        limitations.insert(0, uncertainty_note)
 
     references = build_references_from_citations(papers, citations)
     comparison_table = build_comparison_table(papers, citations)

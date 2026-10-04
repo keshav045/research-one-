@@ -181,7 +181,7 @@ export const EvidencePanel: React.FC<EvidencePanelProps> = ({
             <div className="flex items-center justify-between">
               <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider flex items-center gap-1">
                 <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
-                Claim Verification ({citation.atomicClaims.length})
+                Source Match ({citation.atomicClaims.length})
               </p>
               {(citation.extractionConfidence !== undefined || citation.entailmentScore !== undefined) && (
                 <span className="text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded border border-blue-200 bg-blue-50 text-blue-700">

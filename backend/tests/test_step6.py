@@ -39,6 +39,7 @@ from backend.services.local_llm_service import (
     synthesize_report,
 )
 from backend.services.ranker import select_anchor_paper, normalize_paper_title
+from backend.services.research_workflow import get_investigation_status
 
 
 # ─── Unit Test 1: NLI Fallback Never ENTAILS ──────────────────────────────────
@@ -95,14 +96,8 @@ def test_false_sentence_rejected():
 # ─── Unit Test 3: Status Rules ────────────────────────────────────────────────
 
 def test_status_rules():
-    # Helper simulating status logic
-    def get_status(answer_sent_count, integrity, anchor_conf, is_abstract_only):
-        if answer_sent_count == 0 or integrity == 0.0:
-            return "insufficient_evidence"
-        elif integrity < 0.80 or anchor_conf == "uncertain" or is_abstract_only:
-            return "completed_with_warnings"
-        else:
-            return "completed"
+    # Production function call from research_workflow
+    get_status = get_investigation_status
 
     # Completed
     assert get_status(4, 1.0, "high", False) == "completed"

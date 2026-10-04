@@ -74,7 +74,7 @@ export const SourcesView: React.FC<SourcesViewProps> = ({ papers, onSelectPaper,
                     <p className="text-xs text-gray-500 line-clamp-2 leading-relaxed">{paper.abstract}</p>
                   </div>
                   <div className="pt-2 border-t border-gray-100 flex items-center justify-between text-xs text-gray-400">
-                    <span>{paper.evidenceCount} evidence pts • <span className="text-gray-700 font-medium">{paper.claimsSupportedCount} verified</span></span>
+                    <span>{paper.evidenceCount} evidence pts • <span className="text-gray-700 font-medium">{paper.claimsSupportedCount} source matches</span></span>
                     <span className="text-gray-400 group-hover:text-black">Details →</span>
                   </div>
                 </div>

@@ -56,6 +56,7 @@ from .vector_store import VectorStore
 from .evidence import extract_and_verify_evidence
 from .local_llm_service import synthesize_report
 from .query_planner import plan_queries
+from .text_utils import split_into_sentences
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ def _make_pipeline() -> list[dict]:
         {"id": "step-3", "name": "Relevance Reranking",    "status": "pending",  "description": "Multi-factor scoring: cross-encoder reranker, citations, and title match",     "iconName": "Filter"},
         {"id": "step-4", "name": "PDF Full-Text Extraction","status": "pending", "description": "Downloading PDFs, stripping headers/footers/references, segmenting windows",  "iconName": "Database"},
         {"id": "step-5", "name": "Vector Indexing",        "status": "pending",  "description": "Building per-job FAISS index with L2-normalized passage embeddings",          "iconName": "GitCompare"},
-        {"id": "step-6", "name": "Evidence & NLI Engine",  "status": "pending",  "description": "Verifying candidate claims against passages via DeBERTa-v3 on CUDA",           "iconName": "CheckCircle2"},
+        {"id": "step-6", "name": "Evidence & Source Match","status": "pending",  "description": "Extracting candidate assertions and verifying via source match",              "iconName": "CheckCircle2"},
         {"id": "step-7", "name": "Academic Synthesis",     "status": "pending",  "description": "Synthesizing verified claims with bracketed citations and comparison table",   "iconName": "FileText"},
     ]
 
@@ -88,9 +89,71 @@ def _advance_step(pipeline: list[dict], done_id: str, next_id: Optional[str]) ->
         _set_step(pipeline, next_id, "active")
 
 
+# ─── Status Determination Rules ───────────────────────────────────────────────
+
+def determine_investigation_status(
+    answer_sent_count: int,
+    integrity: float,
+    anchor_conf: str = "high",
+    is_abstract_only: bool = False,
+    confidence_note: Optional[str] = None,
+    candidate_count: int = 0,
+    passages_total: int = 0,
+) -> tuple[str, list[str]]:
+    """
+    Step 6C: Production Investigation Status Determination.
+    Returns (status, status_reasons).
+    Status rules:
+    - If answer_sent_count == 0 or integrity == 0.0 -> 'insufficient_evidence'
+    - Else if integrity < 0.80 or anchor_conf == 'uncertain' or is_abstract_only -> 'completed_with_warnings'
+    - Else -> 'completed'
+    """
+    status_reasons: list[str] = []
+
+    if answer_sent_count == 0 or integrity == 0.0:
+        status = "insufficient_evidence"
+        fail_reason = (
+            f"Evidence gate failed: Zero verified answer sentences passed NLI verification. "
+            f"Ingested {candidate_count} candidate papers across {passages_total} passages."
+        )
+        status_reasons.append(fail_reason)
+    elif integrity < 0.80 or anchor_conf == "uncertain" or is_abstract_only:
+        status = "completed_with_warnings"
+        if integrity < 0.80:
+            status_reasons.append(f"Citation integrity ({integrity:.1%}) is below the 80% threshold.")
+        if anchor_conf == "uncertain":
+            status_reasons.append(confidence_note or "Anchor paper selection is marked uncertain.")
+        if is_abstract_only:
+            status_reasons.append("Anchor paper was analyzed via abstract only (full-text PDF unavailable).")
+    else:
+        status = "completed"
+
+    return status, status_reasons
+
+
+def get_investigation_status(
+    answer_sent_count: int,
+    integrity: float,
+    anchor_conf: str = "high",
+    is_abstract_only: bool = False,
+) -> str:
+    """Convenience wrapper returning just the status string."""
+    status, _ = determine_investigation_status(
+        answer_sent_count=answer_sent_count,
+        integrity=integrity,
+        anchor_conf=anchor_conf,
+        is_abstract_only=is_abstract_only,
+    )
+    return status
+
+
 # ─── Integrity Metrics ────────────────────────────────────────────────────────
 
-def _compute_metrics(citations: list[Citation], report: ResearchReport) -> IntegrityMetrics:
+def _compute_metrics(
+    citations: list[Citation],
+    report: ResearchReport,
+    verified_answer_count: Optional[int] = None,
+) -> IntegrityMetrics:
     """
     Compute citation integrity formula:
       citation_score = weighted NLI score for that citation
@@ -127,9 +190,11 @@ def _compute_metrics(citations: list[Citation], report: ResearchReport) -> Integ
     avg = score_sum / total_assertions if total_assertions > 0 else 0.0
     coverage = max(0, min(100, round(avg * 100)))
 
+    verified_claims_badge = verified_answer_count if verified_answer_count is not None else verified
+
     return IntegrityMetrics(
         citationCoverage=coverage,
-        verifiedClaims=verified,
+        verifiedClaims=verified_claims_badge,
         partiallySupportedClaims=partial,
         unsupportedClaims=unsupported,
         contradictedClaims=contradicted,
@@ -479,37 +544,32 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         )
         record_stage("report_synthesis", t0, in_count=len(citations), out_count=1)
 
-        metrics = _compute_metrics(citations, report)
+        # Step 6C: Investigation Status Determination
+        anchor_is_abstract_only = getattr(anchor_paper, "is_abstract_only", False) if anchor_paper else False
+        anchor_conf = anchor_debug.get("anchor_confidence", "high")
+        confidence_note = anchor_debug.get("confidence_note")
+
+        # Replace executiveSummary.split('. ') with the real sentence list
+        exec_sentences = split_into_sentences(report.executiveSummary)
+        # Verified claim sentences count (excluding metadata first sentence)
+        claim_sent_count = max(0, len(exec_sentences) - 1) if (len(exec_sentences) > 1 and integrity > 0) else 0
+
+        status, status_reasons = determine_investigation_status(
+            answer_sent_count=claim_sent_count,
+            integrity=integrity,
+            anchor_conf=anchor_conf,
+            is_abstract_only=anchor_is_abstract_only,
+            confidence_note=confidence_note,
+            candidate_count=len(enriched_papers),
+            passages_total=job.passages_total,
+        )
+        job.status = status
+        job.failure_reason = "; ".join(status_reasons) if status_reasons else None
+
+        metrics = _compute_metrics(citations, report, verified_answer_count=claim_sent_count)
 
         _advance_step(pipeline, "step-7", None)
         job.set_pipeline(pipeline)
-
-        # Step 6C: Investigation Status Determination
-        status_reasons: list[str] = []
-        anchor_is_abstract_only = getattr(anchor_paper, "is_abstract_only", False) if anchor_paper else False
-        anchor_conf = anchor_debug.get("anchor_confidence", "high")
-        answer_sents = [s for s in report.executiveSummary.split(". ") if s.strip()]
-
-        if len(answer_sents) == 0 or integrity == 0.0:
-            job.status = "insufficient_evidence"
-            fail_reason = (
-                f"Evidence gate failed: Zero verified answer sentences passed NLI verification. "
-                f"Ingested {len(enriched_papers)} candidate papers across {job.passages_total} passages."
-            )
-            job.failure_reason = fail_reason
-            status_reasons.append(fail_reason)
-        elif integrity < 0.80 or anchor_conf == "uncertain" or anchor_is_abstract_only:
-            job.status = "completed_with_warnings"
-            if integrity < 0.80:
-                status_reasons.append(f"Citation integrity ({integrity:.1%}) is below the 80% threshold.")
-            if anchor_conf == "uncertain":
-                status_reasons.append(anchor_debug.get("confidence_note") or "Anchor paper selection is marked uncertain.")
-            if anchor_is_abstract_only:
-                status_reasons.append("Anchor paper was analyzed via abstract only (full-text PDF unavailable).")
-            job.failure_reason = "; ".join(status_reasons)
-        else:
-            job.status = "completed"
-            job.failure_reason = None
 
         debug_info["status_reasons"] = status_reasons
         debug_info["citation_integrity"] = integrity

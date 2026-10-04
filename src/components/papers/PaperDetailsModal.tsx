@@ -103,8 +103,8 @@ export const PaperDetailsModal: React.FC<PaperDetailsModalProps> = ({ paper, evi
                   <p className="font-bold text-gray-900 font-mono">{paperEvidence.length} items</p>
                 </div>
                 <div className="p-3 rounded border border-gray-200 bg-gray-50">
-                  <p className="text-[10px] text-gray-400 mb-0.5">Claims Verified</p>
-                  <p className="font-bold text-gray-900 font-mono">{paper.claimsSupportedCount} claims</p>
+                  <p className="text-[10px] text-gray-400 mb-0.5">Source Match</p>
+                  <p className="font-bold text-gray-900 font-mono">{paper.claimsSupportedCount} matches</p>
                 </div>
               </div>
             </div>
