@@ -55,6 +55,7 @@ from .pdf_extractor import extract_papers_batch
 from .vector_store import VectorStore
 from .evidence import extract_and_verify_evidence
 from .local_llm_service import synthesize_report
+from .query_planner import plan_queries
 
 logger = logging.getLogger(__name__)
 
@@ -313,9 +314,17 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         enriched_candidates = await enrich_papers_with_openalex(enriched_candidates)
 
         anchor_paper = None
+        alternate_paper = None
         anchor_debug: dict[str, Any] = {"anchor_paper_id": None, "reason": "not_factual_lookup"}
         if q_type == "factual_lookup":
             anchor_paper, enriched_candidates, anchor_debug = await select_anchor_paper(enriched_candidates, title_guesses, question=question)
+            alt_id = anchor_debug.get("alternate_paper_id")
+            alt_title = anchor_debug.get("alternate_paper_title")
+            if alt_id or alt_title:
+                alternate_paper = next(
+                    (p for p in enriched_candidates if (alt_id and p.id == alt_id) or (alt_title and normalize_paper_title(p.title) == normalize_paper_title(alt_title))),
+                    None,
+                )
 
         # 3. Rank papers and cut to top N AFTER enrichment
         ranked_papers = rank_papers(
@@ -463,7 +472,7 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
             citations=citations,
             anchor_paper=anchor_paper,
             anchor_confidence=anchor_debug.get("anchor_confidence", "high"),
-            alternate_paper=anchor_debug.get("alternate_paper"),
+            alternate_paper=alternate_paper,
             anchor_rule=anchor_debug.get("anchor_rule", "none"),
             stage_stats=stage_stats,
             retrieval_warnings=debug_info.get("retrieval_errors"),

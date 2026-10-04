@@ -613,7 +613,6 @@ async def select_anchor_paper(
         "confidence_note": confidence_note,
         "alternate_paper_id": alternate_paper.id if alternate_paper else None,
         "alternate_paper_title": alternate_paper.title if alternate_paper else None,
-        "alternate_paper": alternate_paper,
     }
 
 
