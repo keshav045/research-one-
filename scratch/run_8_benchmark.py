@@ -39,7 +39,7 @@ from backend.services.ranker import (
 from backend.services.pdf_extractor import extract_papers_batch
 from backend.services.vector_store import VectorStore
 from backend.services.evidence import clean_hyphenated_breaks, extract_and_verify_evidence
-from tests.benchmark_expected import is_expected_paper
+from tests.benchmark_expected import is_expected_paper, check_paper_match
 
 BENCHMARK_QUESTIONS = [
     {
@@ -100,6 +100,31 @@ BENCHMARK_QUESTIONS = [
     {
         "topic": "Latent Diffusion",
         "question": "Which paper introduced High-Resolution Image Synthesis with Latent Diffusion Models?",
+        "is_nonsense": False,
+    },
+    {
+        "topic": "LoRA",
+        "question": "Which paper introduced LoRA?",
+        "is_nonsense": False,
+    },
+    {
+        "topic": "CLIP",
+        "question": "Which paper introduced CLIP?",
+        "is_nonsense": False,
+    },
+    {
+        "topic": "PPO",
+        "question": "Which paper introduced PPO?",
+        "is_nonsense": False,
+    },
+    {
+        "topic": "DDPM",
+        "question": "Which paper introduced DDPM?",
+        "is_nonsense": False,
+    },
+    {
+        "topic": "ResNet",
+        "question": "Which paper introduced ResNet?",
         "is_nonsense": False,
     },
     {
@@ -302,13 +327,17 @@ async def run_single_question(item: dict, reranker: Any) -> dict:
             top_passages_display.append(t)
 
     # Determine anchor string and match status
-    matches_expected = False
+    match_type = "no"
     if anchor_paper:
-        matches_expected = is_expected_paper(anchor_paper, topic) if not is_nonsense else False
-        match_tag = "[MATCH]" if matches_expected else "[NON-MATCH]"
+        match_type = check_paper_match(anchor_paper, topic) if not is_nonsense else "N/A"
+        match_tag = f"[{match_type.upper()}]"
         anchor_str = f"{anchor_paper.title} ({anchor_paper.citationCount:,} cites) {match_tag}"
     else:
+        match_type = "N/A" if is_nonsense else "no"
         anchor_str = "None" if not is_nonsense else "None (Expected for nonsense)"
+
+    anchor_confidence = anchor_debug.get("anchor_confidence", "high")
+    confidence_note = anchor_debug.get("confidence_note", "")
 
     # Handle nonsense question verification & gate check outcome
     nonsense_outcome = None
@@ -336,8 +365,8 @@ async def run_single_question(item: dict, reranker: Any) -> dict:
         logger.info("[NonsenseCheck] %s", fail_reason)
 
     logger.info(
-        "Result: %s | Found: %s | Rank: %s | Anchor: %s (Rule: %s) | S2 calls: %s",
-        topic, found_str, rank_str, anchor_str, anchor_rule, s2_call_summary
+        "Result: %s | Match: %s | Rank: %s | Anchor: %s (Rule: %s, Conf: %s) | S2 calls: %s",
+        topic, match_type, rank_str, anchor_str, anchor_rule, anchor_confidence, s2_call_summary
     )
 
     return {
@@ -351,9 +380,11 @@ async def run_single_question(item: dict, reranker: Any) -> dict:
         "expected_found": found_str,
         "rank_in_final": rank_str,
         "expected_paper_title": real_paper_found.title if real_paper_found else ("N/A (Nonsense)" if is_nonsense else "MISS"),
+        "match_type": match_type,
         "anchor_chosen": anchor_str,
-        "anchor_matches_expected": "yes" if matches_expected else ("N/A" if is_nonsense else "no"),
         "anchor_rule": anchor_rule,
+        "anchor_confidence": anchor_confidence,
+        "confidence_note": confidence_note,
         "anchor_passages_indexed": anchor_passages_indexed,
         "anchor_source_kind": anchor_source_kind,
         "anchor_passages_in_top5": f"{anchor_passages_in_top5}/5",
@@ -395,9 +426,11 @@ async def main():
                 "expected_found": "TIMEOUT",
                 "rank_in_final": "TIMEOUT",
                 "expected_paper_title": "TIMEOUT",
+                "match_type": "TIMEOUT",
                 "anchor_chosen": "TIMEOUT",
                 "anchor_rule": "none",
-                "top_3_passages_subq1": [],
+                "anchor_confidence": "none",
+                "top_passages_subq1": [],
                 "duration_s": round(time.time() - t0, 1),
             })
         except Exception as exc:
@@ -413,9 +446,11 @@ async def main():
                 "expected_found": "ERROR",
                 "rank_in_final": "ERROR",
                 "expected_paper_title": "ERROR",
+                "match_type": "ERROR",
                 "anchor_chosen": "ERROR",
                 "anchor_rule": "none",
-                "top_3_passages_subq1": [],
+                "anchor_confidence": "none",
+                "top_passages_subq1": [],
                 "duration_s": round(time.time() - t0, 1),
             })
         out_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
@@ -425,16 +460,18 @@ async def main():
     total_200 = sum(r.get("s2_200", 0) for r in results)
     total_429 = sum(r.get("s2_429", 0) for r in results)
 
-    print("\n" + "=" * 140)
+    print("\n" + "=" * 160)
     print(f"BENCHMARK RESULTS TABLE (S2 key loaded: {has_s2_key} | Total S2 Calls: 200={total_200}, 429={total_429})")
-    print("=" * 140)
-    print("| Topic / Question | Expected Paper Found (by ID/Exact Title) | Anchor Matches Expected (yes/no) | Anchor Chosen | Rule Used | Anchor Passages Indexed + Source Kind | Top 5 Passages from Anchor | S2 429 Count | Top Passage Titles for Sub-Question 1 |")
+    print("=" * 160)
+    print("| Topic / Question | Match Type (Exact/Acceptable/No) | Anchor Chosen | Rule Used | Anchor Confidence | Anchor Passages Indexed + Source Kind | Top 5 Passages from Anchor | S2 429 Count | Nonsense Status & Failure Reason (if applicable) |")
     print("|---|---|---|---|---|---|---|---|---|")
     for r in results:
-        passages_str = "<br>".join([f"• {t[:40]}..." if len(t)>40 else f"• {t}" for t in r.get("top_passages_subq1", [])]) or "None"
-        found_disp = f"{r['expected_found']}<br>*{r.get('expected_paper_title', 'N/A')[:40]}*" if r['expected_found'] != "MISS" else "MISS"
-        print(f"| **{r['topic']}**<br>*{r['question']}* | {found_disp} | {r.get('anchor_matches_expected', 'no')} | {r.get('anchor_chosen', 'None')} | `{r.get('anchor_rule', 'none')}` | {r.get('anchor_passages_indexed', 0)} ({r.get('anchor_source_kind', 'none')}) | {r.get('anchor_passages_in_top5', '0/5')} | {r.get('s2_429', 0)} | {passages_str} |")
-    print("=" * 140 + "\n")
+        nonsense_info = "N/A"
+        if r.get("is_nonsense") and r.get("nonsense_outcome"):
+            out = r["nonsense_outcome"]
+            nonsense_info = f"Status: `{out.get('status')}`<br>Reason: {out.get('reason')}"
+        print(f"| **{r['topic']}**<br>*{r['question']}* | **{r.get('match_type', 'no')}** | {r.get('anchor_chosen', 'None')} | `{r.get('anchor_rule', 'none')}` | `{r.get('anchor_confidence', 'high')}` | {r.get('anchor_passages_indexed', 0)} ({r.get('anchor_source_kind', 'none')}) | {r.get('anchor_passages_in_top5', '0/5')} | {r.get('s2_429', 0)} | {nonsense_info} |")
+    print("=" * 160 + "\n")
 
 
 if __name__ == "__main__":

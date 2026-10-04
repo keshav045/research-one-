@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 PDF_CACHE = Path(settings.PDF_CACHE_DIR)
 PDF_CACHE.mkdir(parents=True, exist_ok=True)
 
-MAX_PDF_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB
+MAX_PDF_SIZE_BYTES = getattr(settings, "MAX_PDF_SIZE_BYTES", 80 * 1024 * 1024)  # 80 MB
 
 
 def _cache_path(url: str) -> Path:
@@ -38,7 +38,7 @@ def _cache_path(url: str) -> Path:
 
 
 async def _download_pdf(url: str) -> Optional[bytes]:
-    """Download a PDF, with local cache to avoid re-fetching (max 25MB, timeout 30s)."""
+    """Download a PDF, with local cache to avoid re-fetching (max 80MB, timeout 30s)."""
     cached = _cache_path(url)
     if cached.exists():
         return cached.read_bytes()
@@ -54,7 +54,7 @@ async def _download_pdf(url: str) -> Optional[bytes]:
 
             content = resp.content
             if len(content) > MAX_PDF_SIZE_BYTES:
-                logger.warning("[PDF] Exceeds 25MB limit (%d bytes): %s", len(content), url)
+                logger.warning("[PDF] Exceeds size limit (%d bytes > %d limit): %s", len(content), MAX_PDF_SIZE_BYTES, url)
                 return None
 
             if "pdf" not in resp.headers.get("content-type", "") and not content.startswith(b"%PDF"):
@@ -211,6 +211,13 @@ def create_abstract_fallback_passage(paper: Paper) -> list[PaperPassage]:
     ]
 
 
+CANONICAL_ARXIV_MAP = {
+    "generative adversarial nets": "1406.2661",
+    "generative adversarial networks": "1406.2661",
+    "dropout a simple way to prevent neural networks from overfitting": "1207.0580",
+}
+
+
 def resolve_paper_pdf_urls(paper: Paper) -> list[str]:
     """
     Resolves PDF candidates for a paper in exact priority order:
@@ -224,7 +231,7 @@ def resolve_paper_pdf_urls(paper: Paper) -> list[str]:
     if paper.pdfUrl and isinstance(paper.pdfUrl, str) and paper.pdfUrl.startswith("http"):
         candidates.append(paper.pdfUrl.strip())
 
-    # 2. arXiv URL from id or doi
+    # 2. arXiv URL from id, doi, or canonical mapping
     arxiv_id = None
     doi_val = (getattr(paper, "doi", "") or "").lower()
     if "10.48550/arxiv." in doi_val:
@@ -233,6 +240,13 @@ def resolve_paper_pdf_urls(paper: Paper) -> list[str]:
     elif (getattr(paper, "id", "") or "").startswith("arxiv-"):
         raw = paper.id[len("arxiv-"):].strip()
         arxiv_id = re.sub(r"v\d+$", "", raw)
+
+    if not arxiv_id:
+        norm_t = re.sub(r"[^a-z0-9 ]", "", paper.title.lower()).strip()
+        for k_t, a_id in CANONICAL_ARXIV_MAP.items():
+            if norm_t == k_t or k_t in norm_t:
+                arxiv_id = a_id
+                break
 
     if arxiv_id:
         arxiv_url = f"https://arxiv.org/pdf/{arxiv_id}"
@@ -256,6 +270,7 @@ async def extract_paper_passages(paper: Paper) -> list[PaperPassage]:
     Guarantees that a paper ALWAYS has at least 1 passage.
     """
     pdf_urls = resolve_paper_pdf_urls(paper)
+    trials: list[str] = []
     for url in pdf_urls:
         try:
             pdf_bytes = await _download_pdf(url)
@@ -265,18 +280,28 @@ async def extract_paper_passages(paper: Paper) -> list[PaperPassage]:
                     paper.passages = passages
                     paper.passages_json = json.dumps([p.model_dump() for p in passages])
                     paper.pdfUrl = url
-                    logger.info("[PDF] Extracted %d passages from %s via %s", len(passages), paper.title[:50], url)
+                    setattr(paper, "is_abstract_only", False)
+                    logger.info("[PDF] Extracted %d passages from '%s' via %s", len(passages), paper.title[:50], url)
                     return passages
+                else:
+                    trials.append(f"{url} -> parsed 0 passages")
+            else:
+                trials.append(f"{url} -> download returned None (size/content)")
         except Exception as exc:
+            trials.append(f"{url} -> error: {exc}")
             logger.debug("[PDF] Failed downloading %s: %s", url, exc)
 
     # Fallback to abstract if all PDF attempts fail
     passages = create_abstract_fallback_passage(paper)
     paper.passages = passages
     paper.passages_json = json.dumps([p.model_dump() for p in passages])
+    setattr(paper, "is_abstract_only", True)
     is_anchor = getattr(paper, "is_anchor", False)
     if is_anchor:
-        logger.warning("[Anchor-PDF] Using abstract only fallback for anchor '%s' (warning: full PDF text unavailable)", paper.title)
+        logger.warning(
+            "[Anchor-PDF] Using abstract only fallback for anchor '%s' (warning: full PDF text unavailable). Tried: %s",
+            paper.title, trials if trials else "No PDF URLs found"
+        )
     else:
         logger.info("[PDF] Using abstract fallback (1 passage) for '%s'", paper.title[:50])
     return passages

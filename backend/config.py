@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     NLI_ENTAIL_THRESHOLD: float = 0.80
     RELEVANCE_THRESHOLD: float = 0.30
     ANCHOR_MIN_CITATIONS: int = 1000
+    ANCHOR_WEIGHT_REF: float = 0.5
+    ANCHOR_WEIGHT_CITES: float = 0.3
+    ANCHOR_WEIGHT_EARLINESS: float = 0.2
+    ANCHOR_TOPICAL_MIN: float = 0.35
+    ANCHOR_MARGIN_THRESHOLD: float = 0.10
 
     # Factual Lookup Ranking Weights
     FACTUAL_SEMANTIC_WEIGHT: float = 0.35
@@ -73,6 +78,7 @@ class Settings(BaseSettings):
     # File system
     PDF_CACHE_DIR: str = "./pdf_cache"
     MAX_PDF_WORKERS: int = 4
+    MAX_PDF_SIZE_BYTES: int = 80 * 1024 * 1024  # 80 MB PDF size cap
 
     @property
     def is_ollama_configured(self) -> bool:

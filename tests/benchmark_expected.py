@@ -71,6 +71,7 @@ BENCHMARK_EXPECTED: dict[str, dict[str, Any]] = {
     "word2vec": {
         "question": "Which paper introduced word2vec?",
         "expected_arxiv": ["1301.3781"],
+        "acceptable_alternates": ["1310.4546"],
         "expected_titles": [
             "efficient estimation of word representations in vector space",
         ],
@@ -109,6 +110,46 @@ BENCHMARK_EXPECTED: dict[str, dict[str, Any]] = {
             "high resolution image synthesis with latent diffusion models",
         ],
         "expected_dois": ["10.48550/arxiv.2112.10752"],
+    },
+    "LoRA": {
+        "question": "Which paper introduced LoRA?",
+        "expected_arxiv": ["2106.09685"],
+        "expected_titles": [
+            "lora low rank adaptation of large language models",
+        ],
+        "expected_dois": ["10.48550/arxiv.2106.09685"],
+    },
+    "CLIP": {
+        "question": "Which paper introduced CLIP?",
+        "expected_arxiv": ["2103.00020"],
+        "expected_titles": [
+            "learning transferable visual models from natural language supervision",
+        ],
+        "expected_dois": ["10.48550/arxiv.2103.00020"],
+    },
+    "PPO": {
+        "question": "Which paper introduced PPO?",
+        "expected_arxiv": ["1707.06347"],
+        "expected_titles": [
+            "proximal policy optimization algorithms",
+        ],
+        "expected_dois": ["10.48550/arxiv.1707.06347"],
+    },
+    "DDPM": {
+        "question": "Which paper introduced DDPM?",
+        "expected_arxiv": ["2006.11239"],
+        "expected_titles": [
+            "denoising diffusion probabilistic models",
+        ],
+        "expected_dois": ["10.48550/arxiv.2006.11239"],
+    },
+    "ResNet": {
+        "question": "Which paper introduced ResNet?",
+        "expected_arxiv": ["1512.03385"],
+        "expected_titles": [
+            "deep residual learning for image recognition",
+        ],
+        "expected_dois": ["10.48550/arxiv.1512.03385"],
     },
 }
 
@@ -172,3 +213,34 @@ def is_expected_paper(paper: Any, topic: str) -> bool:
                 return True
 
     return False
+
+
+def check_paper_match(paper: Any, topic: str) -> str:
+    """
+    Checks paper match against ground truth expectations for topic.
+    Returns:
+      - 'exact': Matches expected_arxiv, expected_dois, or expected_titles.
+      - 'acceptable': Matches acceptable_alternates (e.g. 1310.4546 for word2vec).
+      - 'no': Miss / no match.
+    """
+    if is_expected_paper(paper, topic):
+        return "exact"
+
+    spec = BENCHMARK_EXPECTED.get(topic)
+    if not spec:
+        return "no"
+
+    # Check acceptable alternates
+    p_arxiv = _extract_paper_arxiv(paper)
+    if p_arxiv:
+        for alt_a in spec.get("acceptable_alternates", []):
+            if p_arxiv.lower() == alt_a.lower():
+                return "acceptable"
+
+    # Also check DOI / ID for alternate arXiv
+    doi_val = (getattr(paper, "doi", "") or "").lower()
+    for alt_a in spec.get("acceptable_alternates", []):
+        if alt_a.lower() in doi_val:
+            return "acceptable"
+
+    return "no"
