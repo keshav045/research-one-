@@ -375,12 +375,6 @@ class S2ServerError(Exception):
     pass
 
 
-@retry(
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1.5, min=2, max=10),
-    retry=retry_if_exception_type((RateLimitException, S2ServerError, httpx.RequestError)),
-    reraise=False,
-)
 async def _fetch_s2_with_retry(query: str, limit: int, headers: dict) -> list[Paper]:
     """Fetch from Semantic Scholar Graph API with process-wide rate limiting, Retry-After backoff, and tracking."""
     max_attempts = 4
@@ -429,59 +423,62 @@ async def _fetch_s2_with_retry(query: str, limit: int, headers: dict) -> list[Pa
                         _record_s2_call(query, resp.status_code, 0, error=msg, duration_ms=dur_ms)
                         return []
 
-                data = resp.json()
-                raw_papers = data.get("data", [])
-                papers: list[Paper] = []
+                    data = resp.json()
+                    raw_papers = data.get("data", [])
+                    papers: list[Paper] = []
 
-                for p_data in raw_papers:
-                    title = p_data.get("title", "").strip()
-                    if not title:
-                        continue
+                    for p_data in raw_papers:
+                        title = p_data.get("title", "").strip()
+                        if not title:
+                            continue
 
-                    abstract = (p_data.get("abstract") or "").strip()
-                    ext_ids = p_data.get("externalIds") or {}
-                    doi = ext_ids.get("DOI", "")
-                    arxiv_id = ext_ids.get("ArXiv", "")
+                        abstract = (p_data.get("abstract") or "").strip()
+                        ext_ids = p_data.get("externalIds") or {}
+                        doi = ext_ids.get("DOI", "")
+                        arxiv_id = ext_ids.get("ArXiv", "")
 
-                    authors = [
-                        a.get("name", "").strip()
-                        for a in p_data.get("authors", [])
-                        if a.get("name", "").strip()
-                    ]
+                        authors = [
+                            a.get("name", "").strip()
+                            for a in p_data.get("authors", [])
+                            if a.get("name", "").strip()
+                        ]
 
-                    pdf_url = (p_data.get("openAccessPdf") or {}).get("url")
-                    if not pdf_url and arxiv_id:
-                        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+                        pdf_url = (p_data.get("openAccessPdf") or {}).get("url")
+                        if not pdf_url and arxiv_id:
+                            pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
 
-                    clean_id = f"s2-{p_data.get('paperId', '')[:12]}"
-                    citation_count = p_data.get("citationCount") or 0
+                        clean_id = f"s2-{p_data.get('paperId', '')[:12]}"
+                        citation_count = p_data.get("citationCount") or 0
 
-                    paper = Paper(
-                        id=clean_id,
-                        title=title,
-                        authors=authors or ["Unknown"],
-                        publicationYear=p_data.get("year") or 2024,
-                        journalConference=p_data.get("publicationVenue", {}).get("name", "Semantic Scholar") if isinstance(p_data.get("publicationVenue"), dict) else "Semantic Scholar",
-                        doi=doi or (f"10.48550/arXiv.{arxiv_id}" if arxiv_id else ""),
-                        source="Semantic Scholar",
-                        abstract=abstract,
-                        pdfUrl=pdf_url,
-                        citationCount=citation_count,
-                        evidenceCount=0,
-                    )
-                    papers.append(paper)
+                        paper = Paper(
+                            id=clean_id,
+                            title=title,
+                            authors=authors or ["Unknown"],
+                            publicationYear=p_data.get("year") or 2024,
+                            journalConference=p_data.get("publicationVenue", {}).get("name", "Semantic Scholar") if isinstance(p_data.get("publicationVenue"), dict) else "Semantic Scholar",
+                            doi=doi or (f"10.48550/arXiv.{arxiv_id}" if arxiv_id else ""),
+                            source="Semantic Scholar",
+                            abstract=abstract,
+                            pdfUrl=pdf_url,
+                            citationCount=citation_count,
+                            evidenceCount=0,
+                        )
+                        papers.append(paper)
 
-                _record_s2_call(query, 200, len(papers), error=None, duration_ms=dur_ms)
-                return papers
-        except (RateLimitException, S2ServerError):
-            raise
-        except Exception as exc:
-            dur_ms = int((time.time() - t0) * 1000)
-            msg = f"Semantic Scholar network error for query '{query[:40]}': {exc}"
-            logger.warning("[S2] %s", msg)
-            _record_retrieval_error(msg)
-            _record_s2_call(query, 0, 0, error=msg, duration_ms=dur_ms)
-            raise
+                    _record_s2_call(query, 200, len(papers), error=None, duration_ms=dur_ms)
+                    return papers
+
+            except Exception as exc:
+                dur_ms = int((time.time() - t0) * 1000)
+                msg = f"Semantic Scholar network error for query '{query[:40]}': {exc}"
+                logger.warning("[S2] %s", msg)
+                _record_retrieval_error(msg)
+                _record_s2_call(query, 0, 0, error=msg, duration_ms=dur_ms)
+                if attempt < max_attempts:
+                    await asyncio.sleep(2.0 * attempt)
+                    continue
+                return []
+    return []
 
 
 async def _fetch_semantic_scholar_query(query: str, limit: int) -> list[Paper]:
