@@ -203,8 +203,9 @@ def _heuristic_entailment(
     c_lower = claim.lower()
     s_lower = matched_sentence.lower()
 
-    nums_in_claim = re.findall(r"\b\d+(?:\.\d+)?(?:x|%|gb|mb|fps|bits?)?\b", c_lower)
-    nums_supported = all(n in p_lower for n in nums_in_claim)
+    nums_in_claim = re.findall(r"\b\d+(?:,\d+)*(?:\.\d+)?(?:x|%|gb|mb|fps|bits?)?\b", c_lower)
+    p_lower_clean = p_lower.replace(",", "")
+    nums_supported = all(n.replace(",", "") in p_lower_clean for n in nums_in_claim)
 
     is_claim_pos = bool(re.search(r"\b(improves|increases|speedup|accelerates|higher|outperforms)\b", c_lower))
     is_claim_neg = bool(re.search(r"\b(reduces|decreases|diminishes|degrades|lower)\b", c_lower))
@@ -219,7 +220,7 @@ def _heuristic_entailment(
             f"Neutral: numbers ({', '.join(nums_in_claim)}) not confirmed verbatim in passage."
         )
 
-    # Always return NEUTRAL on heuristic fallback to prevent false positives
+    # Always return NEUTRAL on heuristic fallback to prevent false positives (never ENTAILS)
     return EntailmentVerdict.NEUTRAL, 0.50, "Neutral: heuristic fallback cannot guarantee full entailment."
 
 
@@ -287,3 +288,133 @@ def verify_claims_batch(
                 )
             )
         return verifications
+
+
+# ─── Step 6B: Answer-Level NLI Verification ───────────────────────────────────
+
+def _extract_premise_for_citation(cit: Any) -> str:
+    """Extract cited claim sentence plus one neighboring sentence on each side from source passage."""
+    passage = getattr(cit, "passage", "") or ""
+    if not passage:
+        return getattr(cit, "claim", "") or getattr(cit, "highlightSentence", "") or ""
+
+    raw_sents = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", passage.strip())
+    sents = [s.strip() for s in raw_sents if s.strip()]
+    if not sents:
+        return passage
+
+    target = (getattr(cit, "highlightSentence", "") or getattr(cit, "claim", "") or "").strip().lower()
+    best_idx = 0
+    best_overlap = -1
+    target_words = set(re.findall(r"\w+", target))
+
+    for idx, s in enumerate(sents):
+        s_words = set(re.findall(r"\w+", s.lower()))
+        overlap = len(target_words & s_words)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_idx = idx
+
+    start_idx = max(0, best_idx - 1)
+    end_idx = min(len(sents), best_idx + 2)
+    return " ".join(sents[start_idx:end_idx])
+
+
+def verify_answer_sentences(
+    answer_text: str,
+    citations: list[Any],
+    anchor_paper: Optional[Any] = None,
+) -> tuple[str, float, list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Step 6B Answer-level NLI:
+    - For each answer sentence:
+      Hypothesis = the sentence.
+      Premise = cited claim sentences plus one neighboring sentence on each side from source passage.
+    - Verified if entailment >= NLI_ENTAIL_THRESHOLD (config, 0.80).
+    - Unsupported sentences are REMOVED from the final answer and logged in debug data.
+    - Citation integrity = verified sentences / answer sentences.
+    - Returns (verified_answer_text, integrity_ratio, verified_details, removed_details).
+    """
+    if not answer_text or not answer_text.strip():
+        return "", 0.0, [], []
+
+    badge_map = {getattr(c, "badgeNumber", 0): c for c in citations}
+    raw_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\"'])", answer_text.strip()) if s.strip()]
+    if not raw_sentences:
+        return "", 0.0, [], []
+
+    threshold = getattr(settings, "NLI_ENTAIL_THRESHOLD", 0.80)
+    pairs_to_eval: list[tuple[str, str, str, list[int]]] = []
+
+    for sent in raw_sentences:
+        badges = [int(m) for m in re.findall(r"\[(\d+)\]", sent)]
+        if badges:
+            premise_parts = []
+            for b in badges:
+                c = badge_map.get(b)
+                if c:
+                    premise_parts.append(_extract_premise_for_citation(c))
+            premise_text = " ".join(premise_parts) if premise_parts else ""
+        else:
+            # Check if sentence is introductory (names source paper or uncertain source)
+            is_intro = any(kw in sent.lower() for kw in ("source paper is", "was introduced by", "proposed by", "introduced the", "introduces the"))
+            if is_intro and anchor_paper:
+                premise_text = f"{anchor_paper.title}. {getattr(anchor_paper, 'abstract', '') or ''}"
+            else:
+                premise_text = ""
+
+        # Hypothesis strips bracketed markers for clean evaluation
+        clean_hypothesis = re.sub(r"\[\d+(?:,\s*\d+)*\]", "", sent).strip()
+        pairs_to_eval.append((premise_text, clean_hypothesis, sent, badges))
+
+    verified_sentences: list[str] = []
+    verified_details: list[dict[str, Any]] = []
+    removed_details: list[dict[str, Any]] = []
+
+    for premise, hypothesis, original_sent, badges in pairs_to_eval:
+        if not premise:
+            removed_details.append({
+                "sentence": original_sent,
+                "reason": "Missing supporting citation badges or ground-truth premise",
+                "entailment_score": 0.0,
+                "verdict": "UNSUPPORTED",
+            })
+            logger.info("[NLI-Answer] Removed uncited/unsupported sentence: '%s'", original_sent[:80])
+            continue
+
+        try:
+            res = _evaluate_batch_pairs([(premise, hypothesis)])
+            verdict, confidence, reasoning = res[0]
+            entail_score = confidence if verdict == EntailmentVerdict.ENTAILS else (0.50 if verdict == EntailmentVerdict.NEUTRAL else 0.0)
+        except Exception as exc:
+            logger.warning("[NLI-Answer] Inference failed for sentence, using heuristic fallback: %s", exc)
+            verdict, confidence, reasoning = _heuristic_entailment(premise, hypothesis, premise)
+            entail_score = 0.50 if verdict == EntailmentVerdict.NEUTRAL else 0.0
+
+        if verdict == EntailmentVerdict.ENTAILS and confidence >= threshold:
+            verified_sentences.append(original_sent)
+            verified_details.append({
+                "sentence": original_sent,
+                "entailment_score": confidence,
+                "verdict": "VERIFIED",
+                "badges": badges,
+                "reasoning": reasoning,
+            })
+        else:
+            removed_details.append({
+                "sentence": original_sent,
+                "reason": f"Entailment score {confidence:.3f} below threshold {threshold:.2f} ({verdict.value if hasattr(verdict, 'value') else verdict})",
+                "entailment_score": confidence,
+                "verdict": verdict.value if hasattr(verdict, "value") else str(verdict),
+                "reasoning": reasoning,
+            })
+            logger.info(
+                "[NLI-Answer] Removed unsupported sentence: '%s' (verdict=%s, conf=%.3f)",
+                original_sent[:80], verdict, confidence
+            )
+
+    total_sentences = len(raw_sentences)
+    integrity = (len(verified_sentences) / total_sentences) if total_sentences > 0 else 0.0
+    verified_answer_text = " ".join(verified_sentences)
+
+    return verified_answer_text, round(integrity, 3), verified_details, removed_details

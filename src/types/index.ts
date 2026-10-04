@@ -160,7 +160,7 @@ export interface ResearchInvestigation {
   question: string;
   depth: ResearchDepth;
   sources: ResearchSource[];
-  status: 'in_progress' | 'completed' | 'insufficient_evidence' | 'failed';
+  status: 'in_progress' | 'completed' | 'completed_with_warnings' | 'insufficient_evidence' | 'failed';
   papersAnalyzed: number;
   totalPapers: number;
   evidenceItems: number;

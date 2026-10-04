@@ -85,8 +85,8 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({ investigatio
           </div>
           <div className="p-3 rounded-lg border border-gray-200 bg-gray-50/50">
             <p className="text-[10px] text-gray-400 uppercase tracking-wider font-semibold mb-0.5">Citation Integrity</p>
-            <p className="text-xs font-semibold text-gray-500 font-mono">
-              Not yet verified
+            <p className="text-sm font-bold text-gray-900 font-mono">
+              {investigation.citationCoverage != null ? `${investigation.citationCoverage}%` : 'N/A'}
             </p>
           </div>
         </div>
@@ -97,7 +97,7 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({ investigatio
             <span>
               {isRunning
                 ? activeStep ? `Stage: ${activeStep.name}...` : 'Executing...'
-                : isCompleted ? 'Research Pipeline Completed'
+                : isCompleted ? (investigation.status === 'completed_with_warnings' ? 'Completed with Warnings' : 'Research Pipeline Completed')
                 : isInsufficient ? 'Evidence Gate Flagged Insufficient Evidence'
                 : 'Pipeline Failed'}
             </span>

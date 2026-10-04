@@ -89,8 +89,12 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
       <header className="space-y-4 pb-6 border-b border-gray-200">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <span className="px-2 py-0.5 rounded border border-gray-300 bg-gray-50 text-[11px] font-mono font-semibold text-gray-600 uppercase">
-              {isInsufficient ? 'Insufficient Evidence' : 'Synthesis Report'}
+            <span className={`px-2 py-0.5 rounded border text-[11px] font-mono font-semibold uppercase ${
+              isInsufficient ? 'border-orange-300 bg-orange-50 text-orange-700' :
+              investigation.status === 'completed_with_warnings' ? 'border-amber-300 bg-amber-50 text-amber-800' :
+              'border-gray-300 bg-gray-50 text-gray-600'
+            }`}>
+              {isInsufficient ? 'Insufficient Evidence' : (investigation.status === 'completed_with_warnings' ? 'Completed with Warnings' : 'Synthesis Report')}
             </span>
             <span className="text-gray-300">•</span>
             <span className="text-[11px] text-gray-400 font-mono">{investigation.id}</span>
@@ -99,7 +103,7 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
             onClick={onOpenIntegrityDashboard}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-gray-300 bg-white hover:border-black text-xs font-medium text-gray-700 hover:text-black transition-colors"
           >
-            <ShieldCheck className="w-3.5 h-3.5" /> Citation Integrity: Not yet verified
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" /> Citation Integrity: {investigation.citationCoverage != null ? `${investigation.citationCoverage}%` : 'N/A'}
           </button>
         </div>
 
@@ -116,9 +120,22 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
           <StatCard label="Evidence" value={investigation.evidenceItems} subtext="items" icon={Layers} />
           <StatCard label="Verified" value={investigation.verifiedClaims} subtext="claims" icon={CheckCircle2} />
           <StatCard label="Conflicts" value={investigation.potentialConflicts} icon={AlertTriangle} onClick={onOpenIntegrityDashboard} />
-          <StatCard label="Citation Integrity" value="Not yet verified" icon={ShieldCheck} onClick={onOpenIntegrityDashboard} />
+          <StatCard label="Citation Integrity" value={investigation.citationCoverage != null ? `${investigation.citationCoverage}%` : 'N/A'} icon={ShieldCheck} onClick={onOpenIntegrityDashboard} />
         </div>
       </header>
+
+      {/* Completed with Warnings banner */}
+      {investigation.status === 'completed_with_warnings' && (
+        <section className="p-4 rounded-lg border border-amber-300 bg-amber-50 space-y-1.5">
+          <div className="flex items-center gap-2 text-amber-900 font-semibold text-sm">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>Completed with warnings</span>
+          </div>
+          <p className="text-xs text-amber-800 leading-relaxed">
+            {investigation.failure_reason || (investigation.debug?.status_reasons || []).join('; ') || 'Anchor or citation integrity constraints detected.'}
+          </p>
+        </section>
+      )}
 
       {/* Phase 7: Insufficient Evidence notice — rendered instead of full report */}
       {isInsufficient ? (

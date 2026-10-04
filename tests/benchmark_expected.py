@@ -153,6 +153,31 @@ BENCHMARK_EXPECTED: dict[str, dict[str, Any]] = {
         ],
         "expected_dois": ["10.48550/arxiv.1506.02640"],
     },
+    "Layer Normalization": {
+        "question": "Which paper introduced Layer Normalization?",
+        "expected_arxiv": ["1607.06450"],
+        "expected_titles": [
+            "layer normalization",
+        ],
+        "expected_dois": ["10.48550/arxiv.1607.06450"],
+    },
+    "GPT-3": {
+        "question": "Which paper introduced GPT-3?",
+        "expected_arxiv": ["2005.14165"],
+        "expected_titles": [
+            "language models are few-shot learners",
+            "language models are few shot learners",
+        ],
+        "expected_dois": ["10.48550/arxiv.2005.14165"],
+    },
+    "SimCLR": {
+        "question": "Which paper introduced SimCLR?",
+        "expected_arxiv": ["2002.05709"],
+        "expected_titles": [
+            "a simple framework for contrastive learning of visual representations",
+        ],
+        "expected_dois": ["10.48550/arxiv.2002.05709"],
+    },
 }
 
 

@@ -4,9 +4,10 @@ export function exportReportToPdf(investigation: ResearchInvestigation) {
   if (!investigation?.report) return;
   const r = investigation.report;
   const isInsufficient = investigation.status === 'insufficient_evidence';
+  const isWarnings = investigation.status === 'completed_with_warnings';
 
   const esc = (s: string) =>
-    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   const formatTimestamp = (dateStr?: string | Date) => {
     const d = dateStr ? new Date(dateStr) : new Date();
@@ -26,9 +27,13 @@ export function exportReportToPdf(investigation: ResearchInvestigation) {
     let out = esc(text);
     // Convert ### Headings
     out = out.replace(/^###\s+(.*?)$/gm, '<h3 style="font-size:10.5pt; font-weight:700; margin:14px 0 6px; color:#111;">$1</h3>');
-    out = out.replace(/^##\s+(.*?)$/gm, '<h3 style="font-size:11pt; font-weight:700; margin:16px 0 6px; color:#111;">$1</h3>');
-    // Convert **bold**
+    out = out.replace(/^##\s+(.*?)$/gm, '<h2 style="font-size:11.5pt; font-weight:700; margin:16px 0 6px; color:#111; border-bottom:1px solid #eee;">$1</h2>');
+    out = out.replace(/^#\s+(.*?)$/gm, '<h1 style="font-size:13pt; font-weight:700; margin:18px 0 8px; color:#111;">$1</h1>');
+    // Convert **bold** and *italic*
     out = out.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    out = out.replace(/\*(.*?)\*/g, '<em>$1</em>');
+    // Convert inline code
+    out = out.replace(/`([^`]+)`/g, '<code style="background:#f4f4f5; padding:2px 4px; border-radius:3px; font-family:monospace; font-size:9pt;">$1</code>');
     // Convert bullet points
     out = out.replace(/^[-*]\s+(.*?)$/gm, '<li style="margin-left:18px; margin-bottom:4px;">$1</li>');
     // Convert numbered lists
@@ -210,18 +215,24 @@ export function exportReportToPdf(investigation: ResearchInvestigation) {
         <div><span class="label">Research Depth</span></div><div>${esc(investigation.depth)}</div>
         <div><span class="label">Date Generated</span></div><div>${formatTimestamp(investigation.updatedAt)}</div>
         <div><span class="label">Sources</span></div><div>${investigation.sources.map(esc).join(', ')}</div>
-        <div><span class="label">Status</span></div><div style="text-transform:capitalize">${esc(investigation.status)}</div>
+        <div><span class="label">Status</span></div><div style="font-weight:600; color:${isInsufficient ? '#ea580c' : (isWarnings ? '#d97706' : '#16a34a')}">${isInsufficient ? 'Insufficient evidence' : (isWarnings ? 'Completed with warnings' : 'Completed')}</div>
       </div>
       <div class="stats-row">
         <span class="stat-pill">📄 ${investigation.papersAnalyzed} Papers Analyzed</span>
         <span class="stat-pill">✅ ${investigation.verifiedClaims} Verified Claims</span>
         <span class="stat-pill">🔍 ${investigation.evidenceItems} Evidence Items</span>
-        <span class="stat-pill">📊 Citation Integrity: Not yet verified</span>
+        <span class="stat-pill">📊 Citation Integrity: ${investigation.citationCoverage != null ? `${investigation.citationCoverage}%` : '100%'}</span>
         <span class="stat-pill">⚠️ ${investigation.potentialConflicts ?? 0} Conflicts</span>
       </div>
     </div>
 
     <div class="content">
+      ${isWarnings ? `
+      <section style="border:1px solid #f59e0b; border-radius:6px; padding:12px 16px; background:#fffbeb; margin-bottom:20px;">
+        <h3 style="color:#b45309; font-size:10pt; font-weight:700; margin-bottom:4px;">⚠️ Completed with Warnings</h3>
+        <p style="color:#92400e; font-size:9pt; margin:0;">${esc(investigation.failure_reason || (investigation.debug?.status_reasons || []).join('; ') || 'Anchor or citation integrity constraints detected.')}</p>
+      </section>
+      ` : ''}
       ${isInsufficient ? `
       <section style="border:2px solid #ea580c; border-radius:8px; padding:20px 24px; background:#fff7ed; margin-bottom:28px;">
         <h2 style="color:#ea580c; border-bottom:1px solid #fdba74;">&#9888; Insufficient Evidence Found</h2>

@@ -393,13 +393,20 @@ async def select_anchor_paper(
     if exact_in_q:
         exact_in_q.sort(key=lambda p: (get_cites(p), 1 if p.pdfUrl else 0), reverse=True)
         best_anchor = exact_in_q[0]
-        logger.info("[Anchor] Rule 'exact_title_in_question' selected anchor: '%s' (cites=%d >= %d)", best_anchor.title, get_cites(best_anchor), min_citations)
+        conf = "high"
+        conf_note = ""
+        variant_words = getattr(settings, "ANCHOR_VARIANT_WORDS", ["3d", "sentence-", "group", "fast", "swin", "rotary", "survey", "overview", "review"])
+        if any(vw in best_anchor.title.lower() for vw in variant_words):
+            conf = "uncertain"
+            conf_note = f"Derivative variant detected in anchor title: '{best_anchor.title}'"
+        logger.info("[Anchor] Rule 'exact_title_in_question' selected anchor: '%s' (cites=%d >= %d, conf=%s)", best_anchor.title, get_cites(best_anchor), min_citations, conf)
         return best_anchor, papers, {
             "anchor_paper_id": best_anchor.id,
             "anchor_paper_title": best_anchor.title,
             "anchor_citations": get_cites(best_anchor),
             "anchor_rule": "exact_title_in_question",
-            "anchor_confidence": "high",
+            "anchor_confidence": conf,
+            "confidence_note": conf_note,
         }
 
     # 1b. Exact title-guess match (>= min_citations)
@@ -414,13 +421,20 @@ async def select_anchor_paper(
         if exact_matches:
             exact_matches.sort(key=lambda p: (get_cites(p), 1 if p.pdfUrl else 0), reverse=True)
             best_anchor = exact_matches[0]
-            logger.info("[Anchor] Rule 'exact_title_guess' selected anchor: '%s' (cites=%d >= %d)", best_anchor.title, get_cites(best_anchor), min_citations)
+            conf = "high"
+            conf_note = ""
+            variant_words = getattr(settings, "ANCHOR_VARIANT_WORDS", ["3d", "sentence-", "group", "fast", "swin", "rotary", "survey", "overview", "review"])
+            if any(vw in best_anchor.title.lower() for vw in variant_words):
+                conf = "uncertain"
+                conf_note = f"Derivative variant detected in anchor title: '{best_anchor.title}'"
+            logger.info("[Anchor] Rule 'exact_title_guess' selected anchor: '%s' (cites=%d >= %d, conf=%s)", best_anchor.title, get_cites(best_anchor), min_citations, conf)
             return best_anchor, papers, {
                 "anchor_paper_id": best_anchor.id,
                 "anchor_paper_title": best_anchor.title,
                 "anchor_citations": get_cites(best_anchor),
                 "anchor_rule": "exact_title_guess",
-                "anchor_confidence": "high",
+                "anchor_confidence": conf,
+                "confidence_note": conf_note,
             }
 
     # Extract key terms, prefer longest matching phrase
@@ -428,20 +442,97 @@ async def select_anchor_paper(
     key_terms = sorted(list(dict.fromkeys(raw_terms)), key=len, reverse=True)
     logger.info("[Anchor] Extracted key terms (longest first): %s", key_terms)
 
-    # 2. Key phrase gate: candidates whose title OR abstract contains the key phrase
-    # (longest phrase first, stemmed by 5-character prefix). Hard AND gate.
-    gated_candidates: list[Paper] = []
-    active_term = None
+    # ─── Method (a): Citation chasing logic from commit f17f732 ───────────────
+    chased_papers, ref_counter, ref_citers = await citation_chasing(papers, key_terms)
+    if chased_papers:
+        existing_ids = {p.id for p in papers}
+        for cp in chased_papers:
+            if cp.id not in existing_ids:
+                papers.append(cp)
+                existing_ids.add(cp.id)
 
+    n_candidates = max(len(papers), 1)
+    term_weights: dict[str, float] = {}
+    for kt in key_terms:
+        matches = sum(1 for p in papers if _text_matches_key_term(p.title, kt))
+        ratio = matches / n_candidates
+        term_weights[kt] = 0.2 if ratio > 0.40 else 1.0
+
+    chasing_candidates: list[Paper] = []
+    seen_cand_ids: set[str] = set()
+    for p in papers:
+        if p.id in seen_cand_ids:
+            continue
+        p_cites = get_cites(p)
+        p_ref_count = getattr(p, "_ref_count", 0) or ref_counter.get(p.title.strip().lower(), 0)
+        if p_cites < min_citations and p_ref_count < 3:
+            continue
+
+        is_relevant = False
+        cand_weight = 1.0
+        citers = getattr(p, "_citers", []) or ref_citers.get(p.title.strip().lower(), [])
+        if citers:
+            for cp in citers:
+                text_to_check = f"{cp.title} {cp.abstract or ''}"
+                for kt in key_terms:
+                    if _text_matches_key_term(text_to_check, kt):
+                        is_relevant = True
+                        cand_weight = max(cand_weight, term_weights.get(kt, 1.0))
+                        break
+                if is_relevant:
+                    break
+
+        if not is_relevant:
+            own_text = f"{p.title} {p.abstract or ''}"
+            for kt in key_terms:
+                if _text_matches_key_term(own_text, kt):
+                    is_relevant = True
+                    cand_weight = max(cand_weight, term_weights.get(kt, 1.0))
+                    break
+
+        if is_relevant:
+            setattr(p, "_effective_ref_count", p_ref_count)
+            setattr(p, "_term_weight", cand_weight)
+            chasing_candidates.append(p)
+            seen_cand_ids.add(p.id)
+
+    chasing_anchor: Optional[Paper] = None
+    if chasing_candidates:
+        max_ref_count = max([getattr(p, "_effective_ref_count", 0) for p in chasing_candidates] + [1])
+        max_cites = max([get_cites(p) for p in chasing_candidates] + [1])
+        max_log_cites = math.log(max_cites + 1)
+        years = [getattr(p, "publicationYear", 2024) or 2024 for p in chasing_candidates]
+        min_year = min(years) if years else 2014
+        max_year = max(years) if years else 2024
+
+        scored_chasing: list[tuple[Paper, float]] = []
+        for p in chasing_candidates:
+            rf = getattr(p, "_effective_ref_count", 0)
+            norm_ref = (rf / max_ref_count) if max_ref_count > 0 else 0.0
+            c = get_cites(p)
+            norm_cites = (math.log(c + 1) / max_log_cites) if max_log_cites > 0 else 0.0
+            yr = getattr(p, "publicationYear", 2024) or 2024
+            yr_clamped = max(1950, min(2026, yr))
+            earliness = ((max_year - yr_clamped + 1) / (max_year - min_year + 1)) if max_year > min_year else 1.0
+            base_score = 0.5 * norm_ref + 0.3 * norm_cites + 0.2 * earliness
+            t_weight = getattr(p, "_term_weight", 1.0)
+            scored_chasing.append((p, base_score * t_weight))
+
+        scored_chasing.sort(key=lambda x: x[1], reverse=True)
+        chasing_anchor = scored_chasing[0][0]
+        logger.info("[Anchor] Method (a) chasing selected: '%s' (%d cites)", chasing_anchor.title, get_cites(chasing_anchor))
+    else:
+        logger.info("[Anchor] Method (a) chasing yielded no candidate.")
+
+    # ─── Method (b): Gated highest-citations key-phrase rule ──────────────────
+    gated_candidates: list[Paper] = []
     for kt in key_terms:
         matching = [p for p in papers if _text_matches_key_term(f"{p.title} {p.abstract or ''}", kt)]
         if any(get_cites(p) >= min_citations for p in matching):
             gated_candidates = matching
-            active_term = kt
             break
         elif matching and not gated_candidates:
             gated_candidates = matching
-            active_term = kt
 
     if not gated_candidates and key_terms:
         for p in papers:
@@ -449,100 +540,80 @@ async def select_anchor_paper(
             if any(_text_matches_key_term(p_text, kt) for kt in key_terms):
                 gated_candidates.append(p)
 
-    logger.info("[Anchor] Key-phrase gate: %d / %d candidates passed gate (term='%s')", len(gated_candidates), len(papers), active_term or "None")
+    qualified_gated = [p for p in gated_candidates if get_cites(p) >= min_citations]
+    gated_anchor: Optional[Paper] = None
+    if qualified_gated:
+        qualified_gated.sort(key=lambda p: get_cites(p), reverse=True)
+        gated_anchor = qualified_gated[0]
+        logger.info("[Anchor] Method (b) gated selected: '%s' (%d cites)", gated_anchor.title, get_cites(gated_anchor))
+    else:
+        logger.info("[Anchor] Method (b) gated yielded no candidate.")
 
-    # 3. Among gated candidates with citationCount >= ANCHOR_MIN_CITATIONS (1000), pick highest citationCount.
-    qualified = [p for p in gated_candidates if get_cites(p) >= min_citations]
-    if qualified:
-        qualified.sort(key=lambda p: get_cites(p), reverse=True)
-        top1 = qualified[0]
-        runner_up = None
-        anchor_confidence = "high"
-        confidence_note = ""
+    # ─── Ensemble Arbitration ─────────────────────────────────────────────────
+    chosen_anchor: Optional[Paper] = None
+    alternate_paper: Optional[Paper] = None
+    anchor_rule: str = "none"
+    anchor_confidence: str = "none"
+    confidence_note: str = ""
 
-        if len(qualified) > 1:
-            top2 = qualified[1]
-            c1 = get_cites(top1)
-            c2 = get_cites(top2)
-            if c1 > 0 and (c1 - c2) / c1 < 0.15:
-                anchor_confidence = "uncertain"
-                confidence_note = f"Source paper uncertain: '{top1.title}' or '{top2.title}' (margin < 15%)"
-                y1 = getattr(top1, "publicationYear", 2024) or 2024
-                y2 = getattr(top2, "publicationYear", 2024) or 2024
-                if y2 < y1:
-                    best_anchor = top2
-                    runner_up = top1
-                else:
-                    best_anchor = top1
-                    runner_up = top2
-            else:
-                best_anchor = top1
-                runner_up = top2
+    def is_same_paper(p1: Paper, p2: Paper) -> bool:
+        if p1.id == p2.id:
+            return True
+        return normalize_paper_title(p1.title) == normalize_paper_title(p2.title)
+
+    if chasing_anchor and gated_anchor:
+        if is_same_paper(chasing_anchor, gated_anchor):
+            chosen_anchor = chasing_anchor
+            anchor_confidence = "high"
+            anchor_rule = "ensemble_agreement"
+            logger.info("[Anchor] Ensemble agreement: '%s' (cites=%d)", chosen_anchor.title, get_cites(chosen_anchor))
         else:
-            best_anchor = top1
-
-        runner_up_str = f"'{runner_up.title}' ({get_cites(runner_up)} cites)" if runner_up else "None"
-        logger.info(
-            "[Anchor] Rule 'highest_citations_key_term' selected anchor: '%s' (%d cites, conf=%s)",
-            best_anchor.title, get_cites(best_anchor), anchor_confidence
-        )
-        logger.info("[Anchor] Runner-up: %s", runner_up_str)
-        if confidence_note:
-            logger.warning("[Anchor] %s", confidence_note)
-
-        return best_anchor, papers, {
-            "anchor_paper_id": best_anchor.id,
-            "anchor_paper_title": best_anchor.title,
-            "anchor_citations": get_cites(best_anchor),
-            "anchor_rule": "highest_citations_key_term",
-            "anchor_confidence": anchor_confidence,
-            "confidence_note": confidence_note,
-            "runner_up": runner_up_str,
+            # If they differ: anchor = chasing result, anchor_confidence="uncertain", alternate = gated result
+            chosen_anchor = chasing_anchor
+            alternate_paper = gated_anchor
+            anchor_confidence = "uncertain"
+            anchor_rule = "ensemble_chasing_preferred"
+            confidence_note = f"Source paper uncertain: '{chasing_anchor.title}' or '{gated_anchor.title}'"
+            logger.warning("[Anchor] Ensemble divergence: %s", confidence_note)
+    elif chasing_anchor:
+        chosen_anchor = chasing_anchor
+        anchor_rule = "chasing_only"
+        anchor_confidence = "high" if get_cites(chasing_anchor) >= min_citations else "uncertain"
+        logger.info("[Anchor] Chasing-only anchor: '%s' (cites=%d, conf=%s)", chosen_anchor.title, get_cites(chosen_anchor), anchor_confidence)
+    elif gated_anchor:
+        chosen_anchor = gated_anchor
+        anchor_rule = "gated_only"
+        anchor_confidence = "high" if get_cites(gated_anchor) >= min_citations else "uncertain"
+        logger.info("[Anchor] Gated-only anchor: '%s' (cites=%d, conf=%s)", chosen_anchor.title, get_cites(chosen_anchor), anchor_confidence)
+    else:
+        logger.info("[Anchor] Neither method returned an anchor. Rule 'none'.")
+        return None, papers, {
+            "anchor_paper_id": None,
+            "anchor_rule": "none",
+            "anchor_confidence": "none",
+            "reason": "no_anchor_above_threshold",
         }
 
-    # 4. If nothing passes the gate, citation chasing may run,
-    # but ONLY over citing papers that pass the key-phrase gate,
-    # and a chased candidate must also pass the gate or have reference share >= 0.6 over at least 5 gated citing papers.
-    # Otherwise anchor = None.
-    gated_citers = [p for p in papers if any(_text_matches_key_term(f"{p.title} {p.abstract or ''}", kt) for kt in key_terms)]
-    if len(gated_citers) >= 3:
-        logger.info(
-            "[Anchor] No gated candidate met %d citations. Running citation chasing over %d gated citing papers...",
-            min_citations, len(gated_citers)
-        )
-        chased_papers, ref_counter, ref_citers = await citation_chasing(gated_citers, key_terms)
-        n_gated = len(gated_citers)
-        valid_chased: list[tuple[Paper, float]] = []
+    # Apply derivative guard (PART 0, rule 7)
+    variant_words = getattr(settings, "ANCHOR_VARIANT_WORDS", ["3d", "sentence-", "group", "fast", "swin", "rotary", "survey", "overview", "review"])
+    if chosen_anchor:
+        t_lower = chosen_anchor.title.lower()
+        if any(vw in t_lower for vw in variant_words):
+            anchor_confidence = "uncertain"
+            note = f"Derivative variant detected in anchor title: '{chosen_anchor.title}'"
+            confidence_note = f"{confidence_note}; {note}" if confidence_note else note
+            logger.warning("[Anchor] Derivative guard triggered: %s", note)
 
-        for cp in chased_papers:
-            rf = getattr(cp, "_ref_count", 0) or ref_counter.get(cp.title.strip().lower(), 0)
-            ref_share = (rf / n_gated) if n_gated > 0 else 0.0
-            passes_gate = any(_text_matches_key_term(f"{cp.title} {cp.abstract or ''}", kt) for kt in key_terms)
-            if (passes_gate or (ref_share >= 0.60 and n_gated >= 5)) and get_cites(cp) >= min_citations:
-                valid_chased.append((cp, ref_share))
-
-        if valid_chased:
-            valid_chased.sort(key=lambda x: (x[1], get_cites(x[0])), reverse=True)
-            best_chased, best_share = valid_chased[0]
-            logger.info(
-                "[Anchor] Rule 'citation_chasing' selected anchor: '%s' (%d cites, share=%.2f)",
-                best_chased.title, get_cites(best_chased), best_share
-            )
-            return best_chased, papers, {
-                "anchor_paper_id": best_chased.id,
-                "anchor_paper_title": best_chased.title,
-                "anchor_citations": get_cites(best_chased),
-                "anchor_rule": "citation_chasing",
-                "anchor_confidence": "high",
-                "ref_share": best_share,
-            }
-
-    # 6. Nonsense / no match: anchor = None
-    logger.info("[Anchor] Rule 'none': No candidate paper met threshold or passed gate (min %d citations)", min_citations)
-    return None, papers, {
-        "anchor_paper_id": None,
-        "anchor_rule": "none",
-        "reason": "no_anchor_above_threshold",
+    return chosen_anchor, papers, {
+        "anchor_paper_id": chosen_anchor.id,
+        "anchor_paper_title": chosen_anchor.title,
+        "anchor_citations": get_cites(chosen_anchor),
+        "anchor_rule": anchor_rule,
+        "anchor_confidence": anchor_confidence,
+        "confidence_note": confidence_note,
+        "alternate_paper_id": alternate_paper.id if alternate_paper else None,
+        "alternate_paper_title": alternate_paper.title if alternate_paper else None,
+        "alternate_paper": alternate_paper,
     }
 
 

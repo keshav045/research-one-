@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     ANCHOR_WEIGHT_EARLINESS: float = 0.2
     ANCHOR_TOPICAL_MIN: float = 0.35
     ANCHOR_MARGIN_THRESHOLD: float = 0.10
+    ANCHOR_VARIANT_WORDS: list[str] = [
+        "3d", "sentence-", "group", "fast", "swin", "rotary", "survey", "overview", "review"
+    ]
 
     # Factual Lookup Ranking Weights
     FACTUAL_SEMANTIC_WEIGHT: float = 0.35

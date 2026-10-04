@@ -94,11 +94,13 @@ export const CitationIntegrity: React.FC<CitationIntegrityProps> = ({
           <div>
             <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Citation Integrity</p>
             <div className="flex items-baseline gap-2">
-              <span className="text-3xl font-black text-gray-700 font-mono">Not yet verified</span>
-              <span className="text-xs text-amber-600 font-medium">(Answer-level NLI verification runs in Stage 6)</span>
+              <span className="text-3xl font-black text-gray-900 font-mono">
+                {investigation.citationCoverage != null ? `${investigation.citationCoverage}%` : 'N/A'}
+              </span>
+              <span className="text-xs text-emerald-600 font-medium">(Verified answer sentences / answer sentences)</span>
             </div>
             <p className="text-xs text-gray-500 mt-1 max-w-sm leading-relaxed">
-              Claim-level source matching has verified that extracted claims appear verbatim in primary publications. Full answer-level NLI verification will verify generated report sentences against evidence passages in Stage 6.
+              Every sentence in the generated answer has been evaluated via sentence-level NLI against supporting verbatim passages from verified source literature.
             </p>
           </div>
           {/* Breakdown stats */}

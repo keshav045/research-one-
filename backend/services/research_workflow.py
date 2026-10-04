@@ -452,31 +452,61 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
             db.commit()
             return
 
-        # ─── Phase 8: Academic Report Synthesis ───────────────────────────────
+        # ─── Phase 8: Academic Report Synthesis (Step 6A, 6B, 6C) ─────────────
         t0 = time.time()
         logger.info("[Pipeline] Stage 8: Synthesizing academic report from verified evidence...")
-        report = await synthesize_report(
+        report, integrity, removed_sentences = await synthesize_report(
             question=question,
             depth=depth,
             papers=enriched_papers,
             claims=claims,
             citations=citations,
+            anchor_paper=anchor_paper,
+            anchor_confidence=anchor_debug.get("anchor_confidence", "high"),
+            alternate_paper=anchor_debug.get("alternate_paper"),
+            anchor_rule=anchor_debug.get("anchor_rule", "none"),
+            stage_stats=stage_stats,
+            retrieval_warnings=debug_info.get("retrieval_errors"),
         )
         record_stage("report_synthesis", t0, in_count=len(citations), out_count=1)
-
-        if debug_info.get("retrieval_errors"):
-            for err in debug_info["retrieval_errors"]:
-                warn = f"Retrieval Warning: {err}"
-                if warn not in report.limitations:
-                    report.limitations.insert(0, warn)
 
         metrics = _compute_metrics(citations, report)
 
         _advance_step(pipeline, "step-7", None)
         job.set_pipeline(pipeline)
 
+        # Step 6C: Investigation Status Determination
+        status_reasons: list[str] = []
+        anchor_is_abstract_only = getattr(anchor_paper, "is_abstract_only", False) if anchor_paper else False
+        anchor_conf = anchor_debug.get("anchor_confidence", "high")
+        answer_sents = [s for s in report.executiveSummary.split(". ") if s.strip()]
+
+        if len(answer_sents) == 0 or integrity == 0.0:
+            job.status = "insufficient_evidence"
+            fail_reason = (
+                f"Evidence gate failed: Zero verified answer sentences passed NLI verification. "
+                f"Ingested {len(enriched_papers)} candidate papers across {job.passages_total} passages."
+            )
+            job.failure_reason = fail_reason
+            status_reasons.append(fail_reason)
+        elif integrity < 0.80 or anchor_conf == "uncertain" or anchor_is_abstract_only:
+            job.status = "completed_with_warnings"
+            if integrity < 0.80:
+                status_reasons.append(f"Citation integrity ({integrity:.1%}) is below the 80% threshold.")
+            if anchor_conf == "uncertain":
+                status_reasons.append(anchor_debug.get("confidence_note") or "Anchor paper selection is marked uncertain.")
+            if anchor_is_abstract_only:
+                status_reasons.append("Anchor paper was analyzed via abstract only (full-text PDF unavailable).")
+            job.failure_reason = "; ".join(status_reasons)
+        else:
+            job.status = "completed"
+            job.failure_reason = None
+
+        debug_info["status_reasons"] = status_reasons
+        debug_info["citation_integrity"] = integrity
+        debug_info["removed_sentences"] = removed_sentences
+
         # Finalize job record
-        job.status = "completed"
         job.papers_analyzed = len(enriched_papers)
         job.total_papers = len(enriched_papers)
         job.evidence_items = len(citations)
@@ -485,13 +515,16 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         job.unsupported_claims = metrics.unsupportedClaims
         job.contradicted_claims = metrics.contradictedClaims
         job.potential_conflicts = metrics.potentialConflicts
-        job.citation_coverage = metrics.citationCoverage
-        job.uncited_sentences = metrics.uncitedSentences
+        job.citation_coverage = round(integrity * 100)
+        job.uncited_sentences = len(removed_sentences)
         job.set_report(report.model_dump())
         job.set_debug(debug_info)
         db.commit()
 
-        logger.info("[Pipeline] Job %s completed successfully. Citation coverage: %d%%", job_id, metrics.citationCoverage)
+        logger.info(
+            "[Pipeline] Job %s finalized with status '%s' (reasons: %s). Citation integrity: %d%%",
+            job_id, job.status, status_reasons, job.citation_coverage
+        )
 
     except Exception as exc:
         logger.exception("[Pipeline] Job %s failed with exception: %s", job_id, exc)
