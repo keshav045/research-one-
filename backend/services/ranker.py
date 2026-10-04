@@ -7,6 +7,7 @@ using semantic reranking, citation counts, and title relevance bonuses.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import re
@@ -188,7 +189,7 @@ async def citation_chasing(candidates: list[Paper], key_terms: list[str]) -> lis
     if not top_15:
         return []
 
-    from .paper_retrieval import _extract_s2_batch_id, _throttle_s2, S2_BATCH_API
+    from .paper_retrieval import _extract_s2_batch_id, _throttle_s2, _s2_lock, S2_BATCH_API
     batch_ids: list[str] = []
     for p in top_15:
         bid = _extract_s2_batch_id(p)
@@ -202,36 +203,64 @@ async def citation_chasing(candidates: list[Paper], key_terms: list[str]) -> lis
     if getattr(settings, "SEMANTIC_SCHOLAR_API_KEY", "") and settings.SEMANTIC_SCHOLAR_API_KEY.strip():
         headers["x-api-key"] = settings.SEMANTIC_SCHOLAR_API_KEY.strip()
 
-    await _throttle_s2()
     ref_counter: Counter = Counter()
     ref_map: dict[str, dict] = {}
-    try:
-        async with httpx.AsyncClient(timeout=25.0) as client:
-            resp = await client.post(
-                S2_BATCH_API,
-                params={"fields": "title,citationCount,year,references.paperId,references.title,references.citationCount,references.year,references.externalIds,references.abstract,references.fieldsOfStudy"},
-                json={"ids": batch_ids},
-                headers=headers,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                for item in (data or []):
-                    if not item or not isinstance(item, dict):
-                        continue
-                    for ref in item.get("references", []) or []:
-                        rtitle = ref.get("title")
-                        if not rtitle or len(rtitle.strip()) < 5:
+    async with _s2_lock:
+        await _throttle_s2()
+        try:
+            async with httpx.AsyncClient(timeout=25.0) as client:
+                params = {
+                    "fields": "references.paperId,references.title,references.citationCount,references.year,references.externalIds,references.abstract,references.fieldsOfStudy,references.authors"
+                }
+                resp = await client.post(
+                    S2_BATCH_API,
+                    params=params,
+                    json={"ids": batch_ids},
+                    headers=headers,
+                )
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    wait_sec = max(int(retry_after) if retry_after and retry_after.isdigit() else 3, 3)
+                    logger.info("[CitationChasing] S2 batch rate limited; sleeping %ds before retry...", wait_sec)
+                    await asyncio.sleep(wait_sec)
+                    await _throttle_s2()
+                    resp = await client.post(
+                        S2_BATCH_API,
+                        params=params,
+                        json={"ids": batch_ids},
+                        headers=headers,
+                    )
+                from .paper_retrieval import _record_s2_call
+                _record_s2_call(
+                    f"batch_refs:{len(batch_ids)}",
+                    resp.status_code,
+                    0,
+                    error=None if resp.status_code == 200 else f"HTTP {resp.status_code}",
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for item in (data or []):
+                        if not item or not isinstance(item, dict):
                             continue
-                        clean_t = rtitle.strip()
-                        key = clean_t.lower()
-                        ref_counter[key] += 1
-                        if key not in ref_map or (ref.get("citationCount") or 0) > (ref_map[key].get("citationCount") or 0):
-                            ref_map[key] = ref
-            else:
-                logger.warning("[CitationChasing] S2 batch returned HTTP %d", resp.status_code)
-    except Exception as exc:
-        logger.warning("[CitationChasing] S2 batch failed: %s", exc)
-        return []
+                        for ref in item.get("references", []) or []:
+                            rtitle = ref.get("title")
+                            if not rtitle or len(rtitle.strip()) < 5:
+                                continue
+                            fields = ref.get("fieldsOfStudy") or []
+                            if fields and isinstance(fields, list):
+                                cs_related = any(f.lower() in ("computer science", "mathematics", "engineering", "") for f in fields)
+                                if not cs_related:
+                                    continue
+                            clean_t = rtitle.strip()
+                            key = clean_t.lower()
+                            ref_counter[key] += 1
+                            if key not in ref_map or (ref.get("citationCount") or 0) > (ref_map[key].get("citationCount") or 0):
+                                ref_map[key] = ref
+                else:
+                    logger.warning("[CitationChasing] S2 batch returned HTTP %d", resp.status_code)
+        except Exception as exc:
+            logger.warning("[CitationChasing] S2 batch failed: %s", exc)
+            return []
 
     # Log the top 5 most-referenced works found
     top_5 = ref_counter.most_common(5)
@@ -250,13 +279,23 @@ async def citation_chasing(candidates: list[Paper], key_terms: list[str]) -> lis
         fields = r.get("fieldsOfStudy") or []
         fields_str = ", ".join(fields) if isinstance(fields, list) else str(fields)
 
+        authors_raw = r.get("authors") or []
+        authors_list = [
+            a.get("name") if isinstance(a, dict) else str(a)
+            for a in authors_raw
+            if a
+        ]
+        if not authors_list:
+            authors_list = ["Unknown"]
+
         paper = Paper(
             id=pid,
-            title=r.get("title"),
+            title=r.get("title") or "Untitled",
+            authors=authors_list,
             citationCount=r.get("citationCount") or 0,
             publicationYear=r.get("year") or 2020,
             journalConference=fields_str or "Computer Science",
-            doi=doi,
+            doi=doi or "",
             source="Semantic Scholar",
             abstract=r.get("abstract") or f"Foundational work referenced {count} times by top candidate papers in literature review.",
         )
@@ -343,10 +382,11 @@ async def select_anchor_paper(
     anchor_rule = "key_term_highest_citation" if potential_anchor else "none"
 
     # 3. Third priority: Citation chasing
+    # When anchor is None OR the anchor has fewer citations than a top candidate that cites it:
     top_cites_in_pool = max([get_cites(p) for p in papers] + [0])
     should_chase = (
         potential_anchor is None or
-        (top_cites_in_pool > get_cites(potential_anchor) * 1.5 and top_cites_in_pool >= min_citations)
+        (top_cites_in_pool >= min_citations)
     )
 
     if should_chase and key_terms:

@@ -201,6 +201,8 @@ def _record_s2_call(query: str, status_code: int, papers_count: int = 0, error: 
         "duration_ms": duration_ms,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
+    global _last_s2_call_time
+    _last_s2_call_time = time.time()
 
 
 def get_and_clear_s2_call_records() -> list[dict]:
@@ -221,10 +223,10 @@ async def _throttle_arxiv():
 
 
 async def _throttle_s2():
-    """Ensure polite spacing between successive Semantic Scholar requests (>= 3s when unauthenticated, >= 1.1s when authenticated)."""
+    """Ensure polite spacing between successive Semantic Scholar requests (>= 3s when unauthenticated, >= 1.2s when authenticated)."""
     global _last_s2_call_time
     is_authenticated = bool(settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
-    min_interval = 1.1 if is_authenticated else 3.0
+    min_interval = 1.2 if is_authenticated else 3.0
     now = time.time()
     elapsed = now - _last_s2_call_time
     if elapsed < min_interval:
@@ -1043,6 +1045,11 @@ async def retrieve_candidate_papers(
         for g in valid_guesses:
             if g not in s2_queries_list:
                 s2_queries_list.append(g)
+        # Include non-LLM key terms (e.g. acronyms, method names)
+        from .ranker import extract_key_terms
+        for kt in (extract_key_terms(question) if question else []):
+            if kt not in s2_queries_list:
+                s2_queries_list.append(kt)
         for q in plan.get("queries", []):
             if q not in s2_queries_list:
                 s2_queries_list.append(q)
