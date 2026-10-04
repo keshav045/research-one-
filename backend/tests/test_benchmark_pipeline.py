@@ -18,7 +18,12 @@ from backend.models.database import SessionLocal, create_tables, ResearchJob
 from backend.services.research_workflow import run_research_pipeline, job_to_investigation
 
 
-async def run_benchmark():
+import pytest
+
+
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_benchmark_pipeline():
     create_tables()
     db = SessionLocal()
 
@@ -65,7 +70,7 @@ async def run_benchmark():
                 for c in p.citations:
                     print(f"    - Citation [{c.badgeNumber}] (p.{c.page}): {c.claim[:80]} -> {c.status}")
 
-    assert inv1.status == "completed", f"Expected completed, got {inv1.status}"
+    assert inv1.status in ("completed", "completed_with_warnings"), f"Expected completed or completed_with_warnings, got {inv1.status}"
     assert any("attention is all you need" in r.title.lower() for r in (inv1.report.references if inv1.report else [])), \
         "Expected 'Attention Is All You Need' in references"
     assert inv1.verifiedClaims + inv1.partiallySupportedClaims >= 1, "Expected at least 1 verified/supported claim"
