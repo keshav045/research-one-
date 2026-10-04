@@ -59,36 +59,65 @@ def normalize_paper_title(title: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+_PREFIXES_TO_STRIP = (
+    "introduction of",
+    "introduction to",
+    "the paper",
+    "a paper",
+    "paper title",
+)
+_LEFTOVER_PLACEHOLDERS = frozenset({
+    "unknown",
+    "placeholder",
+    "title",
+    "n a",
+    "na",
+    "none",
+    "paper",
+    "the",
+    "a",
+})
+
+
 def validate_title_guesses(title_guesses: list[str]) -> list[str]:
     """
     Validate title guesses:
-    Drop any guess that:
-    - is empty or whitespace
-    - starts with (case-insensitive): 'Introduction of', 'Paper title', 'A paper', 'The paper'
-    - is shorter than 2 words
-    Logs which guesses were dropped.
+    - Strips prefixes ('Introduction of', 'Introduction to', 'The paper', 'A paper', 'Paper title')
+    - Keeps remainder if it has >= 2 words
+    - Drops leftover placeholders ('unknown', 'placeholder', 'title', etc.) and guesses with < 2 words
+    - Logs each strip and drop.
     """
     valid: list[str] = []
-    _DISALLOWED_PREFIXES = (
-        "introduction of",
-        "paper title",
-        "a paper",
-        "the paper",
-    )
     for raw in (title_guesses or []):
         g = raw.strip() if raw else ""
         if not g:
             logger.warning("[TitleGuess] Dropped empty title guess")
             continue
-        lower_g = g.lower()
-        if any(lower_g.startswith(prefix) for prefix in _DISALLOWED_PREFIXES):
-            logger.warning("[TitleGuess] Dropped invalid title guess (disallowed prefix): '%s'", g)
+
+        stripped = g
+        lower_g = stripped.lower()
+
+        # Check and strip prefixes
+        for prefix in _PREFIXES_TO_STRIP:
+            if lower_g.startswith(prefix):
+                remainder = stripped[len(prefix):].strip(" :-\t\n\r\"'")
+                logger.info("[TitleGuess] Stripped prefix '%s' from '%s' -> remainder: '%s'", prefix, g, remainder)
+                stripped = remainder
+                lower_g = stripped.lower()
+                break
+
+        # Check leftover placeholder
+        clean_norm = re.sub(r"[^a-z0-9\s]", " ", lower_g).strip()
+        if clean_norm in _LEFTOVER_PLACEHOLDERS or not stripped:
+            logger.warning("[TitleGuess] Dropped placeholder/empty title guess: '%s' (originally '%s')", stripped, g)
             continue
-        words = g.split()
+
+        words = stripped.split()
         if len(words) < 2:
-            logger.warning("[TitleGuess] Dropped invalid title guess (fewer than 2 words): '%s'", g)
+            logger.warning("[TitleGuess] Dropped invalid title guess (fewer than 2 words): '%s' (originally '%s')", stripped, g)
             continue
-        valid.append(g)
+
+        valid.append(stripped)
     return valid
 
 
@@ -289,27 +318,42 @@ def _normalize_title(title: str) -> str:
     return re.sub(r"[^a-z0-9]", "", t)
 
 
-def _extract_id_key(paper: Paper) -> str:
-    """Get canonical ID key (arXiv ID, DOI, or normalized title)."""
-    if "10.48550/arxiv." in paper.doi.lower():
+def _extract_arxiv_id(paper: Paper) -> Optional[str]:
+    """Extract clean arXiv ID without version suffix."""
+    if paper.doi and "10.48550/arxiv." in paper.doi.lower():
         raw_id = paper.doi.lower().split("10.48550/arxiv.")[-1].strip()
         return re.sub(r"v\d+$", "", raw_id)
     if paper.id.startswith("arxiv-"):
         raw_id = paper.id[len("arxiv-"):].strip()
         return re.sub(r"v\d+$", "", raw_id)
+    if paper.pdfUrl and "arxiv.org/pdf/" in paper.pdfUrl:
+        raw_id = paper.pdfUrl.split("arxiv.org/pdf/")[-1].replace(".pdf", "").strip()
+        return re.sub(r"v\d+$", "", raw_id)
+    return None
+
+
+def _extract_doi(paper: Paper) -> Optional[str]:
+    """Extract clean DOI (excluding arXiv proxy DOIs)."""
     if paper.doi:
-        return paper.doi.lower().strip()
-    return _normalize_title(paper.title)
+        d = paper.doi.strip().lower()
+        if d.startswith("https://doi.org/"):
+            d = d[len("https://doi.org/"):].strip()
+        elif d.startswith("http://doi.org/"):
+            d = d[len("http://doi.org/"):].strip()
+        if d and not d.startswith("10.48550/arxiv."):
+            return d
+    return None
 
 
 def filter_and_deduplicate(papers: list[Paper]) -> list[Paper]:
     """
-    Deduplicates papers by arXiv ID, DOI, and title.
-    When duplicate records of the same paper are found (e.g. arXiv record + S2 record),
-    merges them so the canonical record inherits S2's citationCount and publication venue.
-    Drops papers with:
+    Deduplicates candidate papers:
+    - Checks in priority order: arXiv ID, DOI, then normalized title.
+    - When duplicate records of the same paper are found, merges them:
+      keeps the highest citationCount, merges pdfUrl, abstract, venue, and authors.
+    - Drops papers with:
       - 'withdrawn' in title
-      - empty abstract
+      - empty abstract (< 20 chars)
       - publication year in the future
     """
     current_year = datetime.utcnow().year + 1
@@ -332,39 +376,57 @@ def filter_and_deduplicate(papers: list[Paper]) -> list[Paper]:
             logger.info("[Ranker] Dropping future year paper (%d): %s", p.publicationYear, p.title[:60])
             continue
 
-        # Canonical deduplication keys
-        key = _extract_id_key(p)
+        # Canonical deduplication keys in priority order: arXiv ID, DOI, title
+        aid = _extract_arxiv_id(p)
+        doi = _extract_doi(p)
         title_key = _normalize_title(p.title)
 
-        existing = key_to_paper.get(key) or key_to_paper.get(title_key)
+        existing: Optional[Paper] = None
+        if aid and f"arxiv:{aid}" in key_to_paper:
+            existing = key_to_paper[f"arxiv:{aid}"]
+        elif doi and f"doi:{doi}" in key_to_paper:
+            existing = key_to_paper[f"doi:{doi}"]
+        elif f"title:{title_key}" in key_to_paper:
+            existing = key_to_paper[f"title:{title_key}"]
+
         if existing is not None:
             # Merge duplicate record into existing canonical record
-            # 1. citationCount from S2
+            # 1. Highest citationCount
             p_cites = getattr(p, "citationCount", 0) or 0
             ex_cites = getattr(existing, "citationCount", 0) or 0
             if p_cites > ex_cites:
                 existing.citationCount = p_cites
-            # 2. venue from S2 (prefer specific venue over generic "arXiv" or "Semantic Scholar")
-            if p.journalConference and p.journalConference not in ("arXiv", "Semantic Scholar", "unknown", ""):
-                if existing.journalConference in ("arXiv", "Semantic Scholar", "unknown", ""):
-                    existing.journalConference = p.journalConference
-            # 3. PDF URL
+            # 2. PDF URL
             if not existing.pdfUrl and p.pdfUrl:
                 existing.pdfUrl = p.pdfUrl
+            # 3. Abstract (prefer longer, richer text)
+            if len(p.abstract or "") > len(existing.abstract or ""):
+                existing.abstract = p.abstract
             # 4. DOI
             if not existing.doi and p.doi:
                 existing.doi = p.doi
-            # 5. Abstract
-            if len(p.abstract or "") > len(existing.abstract or ""):
-                existing.abstract = p.abstract
+            # 5. Venue (prefer specific venue over generic "arXiv" or "Semantic Scholar" or "OpenAlex")
+            if p.journalConference and p.journalConference not in ("arXiv", "Semantic Scholar", "OpenAlex", "unknown", ""):
+                if existing.journalConference in ("arXiv", "Semantic Scholar", "OpenAlex", "unknown", ""):
+                    existing.journalConference = p.journalConference
+            # 6. Authors
+            if (not existing.authors or existing.authors == ["Unknown"]) and (p.authors and p.authors != ["Unknown"]):
+                existing.authors = p.authors
 
-            # Map keys to existing
-            key_to_paper[key] = existing
-            key_to_paper[title_key] = existing
+            # Map all keys of this paper to the canonical record
+            if aid:
+                key_to_paper[f"arxiv:{aid}"] = existing
+            if doi:
+                key_to_paper[f"doi:{doi}"] = existing
+            key_to_paper[f"title:{title_key}"] = existing
             continue
 
-        key_to_paper[key] = p
-        key_to_paper[title_key] = p
+        # New canonical paper
+        if aid:
+            key_to_paper[f"arxiv:{aid}"] = p
+        if doi:
+            key_to_paper[f"doi:{doi}"] = p
+        key_to_paper[f"title:{title_key}"] = p
         cleaned.append(p)
 
     logger.info("[Ranker] Filtered & deduplicated %d candidates -> %d valid papers", len(papers), len(cleaned))

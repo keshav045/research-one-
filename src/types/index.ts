@@ -8,7 +8,7 @@ export const DEPTH_COUNTS: Record<ResearchDepth, number> = {
   Deep: 24,
 };
 
-export type ResearchSource = 'arXiv' | 'Semantic Scholar' | 'Uploaded Papers';
+export type ResearchSource = 'arXiv' | 'Semantic Scholar' | 'OpenAlex' | 'Uploaded Papers';
 
 export type StepStatus = 'completed' | 'active' | 'pending' | 'failed';
 

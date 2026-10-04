@@ -43,7 +43,13 @@ from ..models.schemas import (
     StageStat,
     StepStatus,
 )
-from .paper_retrieval import retrieve_papers, enrich_papers_with_s2, get_and_clear_retrieval_errors, get_and_clear_s2_call_records
+from .paper_retrieval import (
+    retrieve_papers,
+    enrich_papers_with_s2,
+    enrich_papers_with_openalex,
+    get_and_clear_retrieval_errors,
+    get_and_clear_s2_call_records,
+)
 from .ranker import rank_papers, select_anchor_paper, normalize_paper_title, filter_and_deduplicate
 from .pdf_extractor import extract_papers_batch
 from .vector_store import VectorStore
@@ -58,7 +64,7 @@ logger = logging.getLogger(__name__)
 def _make_pipeline() -> list[dict]:
     return [
         {"id": "step-1", "name": "Query Planning",         "status": "active",   "description": "Decomposing query, classifying intent, predicting titles and sub-questions", "iconName": "Compass"},
-        {"id": "step-2", "name": "Candidate Retrieval",    "status": "pending",  "description": "Querying arXiv and Semantic Scholar with rate limiting and cache",             "iconName": "DownloadCloud"},
+        {"id": "step-2", "name": "Candidate Retrieval",    "status": "pending",  "description": "Querying arXiv, OpenAlex, and Semantic Scholar with rate limiting and cache", "iconName": "DownloadCloud"},
         {"id": "step-3", "name": "Relevance Reranking",    "status": "pending",  "description": "Multi-factor scoring: cross-encoder reranker, citations, and title match",     "iconName": "Filter"},
         {"id": "step-4", "name": "PDF Full-Text Extraction","status": "pending", "description": "Downloading PDFs, stripping headers/footers/references, segmenting windows",  "iconName": "Database"},
         {"id": "step-5", "name": "Vector Indexing",        "status": "pending",  "description": "Building per-job FAISS index with L2-normalized passage embeddings",          "iconName": "GitCompare"},
@@ -259,6 +265,11 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         r_errors = get_and_clear_retrieval_errors()
         if r_errors:
             debug_info["retrieval_errors"] = r_errors
+            s2_errs = [e for e in r_errors if "semantic scholar" in e.lower() or "s2" in e.lower()]
+            if s2_errs:
+                for step in pipeline:
+                    if step["id"] == "step-2":
+                        step["description"] = f"Retrieved candidates across sources (Warning: {s2_errs[0]})"
 
         # Record per-call Semantic Scholar statuses into stage_stats
         s2_calls = get_and_clear_s2_call_records()
@@ -297,6 +308,9 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
 
         # 2. Enrich candidate papers with S2 batch citations & metadata
         enriched_candidates = await enrich_papers_with_s2(deduped_candidates)
+
+        # 3. Fallback: Enrich any remaining uncited candidate papers with OpenAlex
+        enriched_candidates = await enrich_papers_with_openalex(enriched_candidates)
 
         anchor_paper = None
         anchor_debug: dict[str, Any] = {"anchor_paper_id": None, "reason": "not_factual_lookup"}

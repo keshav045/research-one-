@@ -19,6 +19,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+import uuid
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 ARXIV_API = "https://export.arxiv.org/api/query"
 S2_SEARCH_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 S2_BATCH_API = "https://api.semanticscholar.org/graph/v1/paper/batch"
+OPENALEX_API = "https://api.openalex.org/works"
 S2_FIELDS = "paperId,title,authors,year,publicationVenue,externalIds,abstract,openAccessPdf,citationCount,influentialCitationCount"
 
 DB_PATH = Path(settings.DATABASE_URL.replace("sqlite:///", ""))
@@ -109,6 +111,8 @@ def _get_cache_conn() -> sqlite3.Connection:
 
 
 def _get_cached_response(source: str, query: str) -> Optional[list[dict]]:
+    if getattr(settings, "DISABLE_CACHE", False):
+        return None
     try:
         conn = _get_cache_conn()
         cur = conn.cursor()
@@ -124,16 +128,25 @@ def _get_cached_response(source: str, query: str) -> Optional[list[dict]]:
             try:
                 created_dt = datetime.fromisoformat(created_at.replace(" ", "T"))
                 if datetime.utcnow() - created_dt < timedelta(hours=24):
-                    logger.info("[Cache] Hit for %s: '%s'", source, query[:50])
-                    return json.loads(raw_json)
+                    parsed = json.loads(raw_json)
+                    if parsed:
+                        logger.info("[Cache] Hit for %s: '%s'", source, query[:50])
+                        return parsed
             except Exception:
-                return json.loads(raw_json)
+                parsed = json.loads(raw_json)
+                if parsed:
+                    return parsed
     except Exception as exc:
         logger.debug("[Cache] Read error: %s", exc)
     return None
 
 
 def _set_cached_response(source: str, query: str, data: list[dict]) -> None:
+    if getattr(settings, "DISABLE_CACHE", False):
+        return
+    if not data:
+        # Never cache failed or empty results
+        return
     try:
         conn = _get_cache_conn()
         conn.execute(
@@ -172,6 +185,14 @@ def get_and_clear_retrieval_errors() -> list[str]:
 
 
 def _record_s2_call(query: str, status_code: int, papers_count: int = 0, error: Optional[str] = None, duration_ms: int = 0) -> None:
+    logger.info(
+        "[S2-Call] HTTP %d for '%s' (%d papers, %dms)%s",
+        status_code,
+        query[:50],
+        papers_count,
+        duration_ms,
+        f" - {error}" if error else "",
+    )
     _s2_call_records.append({
         "query": query,
         "status_code": status_code,
@@ -200,12 +221,14 @@ async def _throttle_arxiv():
 
 
 async def _throttle_s2():
-    """Ensure at least 1.2 seconds between successive Semantic Scholar requests."""
+    """Ensure polite spacing between successive Semantic Scholar requests (>= 3s when unauthenticated, >= 1.1s when authenticated)."""
     global _last_s2_call_time
+    is_authenticated = bool(settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
+    min_interval = 1.1 if is_authenticated else 3.0
     now = time.time()
     elapsed = now - _last_s2_call_time
-    if elapsed < 1.2:
-        await asyncio.sleep(1.2 - elapsed)
+    if elapsed < min_interval:
+        await asyncio.sleep(min_interval - elapsed)
     _last_s2_call_time = time.time()
 
 
@@ -347,6 +370,14 @@ async def _fetch_s2_with_retry(query: str, limit: int, headers: dict) -> list[Pa
                 dur_ms = int((time.time() - t0) * 1000)
 
                 if resp.status_code == 429:
+                    is_authenticated = bool(settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
+                    if not is_authenticated:
+                        msg = f"Semantic Scholar HTTP 429 rate limit (unauthenticated) for query '{query[:40]}'. Continuing with other sources."
+                        logger.warning("[S2] %s", msg)
+                        _record_retrieval_error(msg)
+                        _record_s2_call(query, 429, 0, error=msg, duration_ms=dur_ms)
+                        return []
+
                     retry_after = resp.headers.get("Retry-After")
                     wait_sec = int(retry_after) if retry_after and retry_after.isdigit() else 3
                     msg = f"Semantic Scholar HTTP 429 rate limit for query '{query[:40]}'"
@@ -432,8 +463,8 @@ async def _fetch_semantic_scholar_query(query: str, limit: int) -> list[Paper]:
         return [Paper(**item) for item in cached]
 
     headers = {"User-Agent": "ResearchLens/2.0 (academic research tool)"}
-    if settings.SEMANTIC_SCHOLAR_API_KEY:
-        headers["x-api-key"] = settings.SEMANTIC_SCHOLAR_API_KEY
+    if settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip():
+        headers["x-api-key"] = settings.SEMANTIC_SCHOLAR_API_KEY.strip()
 
     try:
         papers = await _fetch_s2_with_retry(query, limit, headers)
@@ -502,8 +533,9 @@ async def enrich_papers_with_s2(papers: list[Paper]) -> list[Paper]:
     enriched_paper_ids: set[str] = set()
 
     headers = {"User-Agent": "ResearchLens/2.0 (academic research tool)"}
-    if settings.SEMANTIC_SCHOLAR_API_KEY:
-        headers["x-api-key"] = settings.SEMANTIC_SCHOLAR_API_KEY
+    is_authenticated = bool(settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
+    if is_authenticated:
+        headers["x-api-key"] = settings.SEMANTIC_SCHOLAR_API_KEY.strip()
 
     batch_size = 500
     for i in range(0, len(all_ids), batch_size):
@@ -526,6 +558,10 @@ async def enrich_papers_with_s2(papers: list[Paper]) -> list[Paper]:
                         msg = f"Semantic Scholar batch rate limited (HTTP 429 for {len(batch_ids)} ids)"
                         logger.warning("[S2-Batch] %s", msg)
                         _record_s2_call(f"batch:{len(batch_ids)}", 429, 0, error=msg, duration_ms=dur_ms)
+                        _record_retrieval_error(msg)
+                        if not is_authenticated:
+                            logger.info("[S2-Batch] Unauthenticated S2 batch rate limited; continuing with OpenAlex enrichment.")
+                            break
                         retry_after = resp.headers.get("Retry-After")
                         wait_sec = int(retry_after) if retry_after and retry_after.isdigit() else 3
                         await asyncio.sleep(wait_sec)
@@ -597,6 +633,330 @@ async def enrich_papers_with_s2(papers: list[Paper]) -> list[Paper]:
     return papers
 
 
+# ─── OpenAlex Client & Citation Enrichment ───────────────────────────────────
+
+_DISTINCTIVE_STOP_WORDS = frozenset({
+    "which", "what", "who", "when", "where", "how", "why", "whose", "whom",
+    "paper", "papers", "introduced", "proposed", "invented", "developed", "created",
+    "published", "wrote", "name", "cite", "first", "architecture", "method",
+    "algorithm", "model", "technique", "approach", "idea", "key", "its", "was",
+    "is", "are", "were", "did", "does", "the", "a", "an", "and", "or", "in", "on",
+    "of", "for", "with", "to", "by", "from", "at", "about"
+})
+
+
+def extract_distinctive_term(question: str) -> Optional[str]:
+    """
+    Extracts a distinctive term (acronym, method name, capitalized name) from a research question
+    without an LLM.
+    """
+    q = question.strip()
+
+    # 1. Acronyms & technical abbreviations: GAN, RAG, ViT, ResNet, word2vec, BERT, LSTM, CNN
+    acronym_match = re.search(r"\b([A-Z]{2,6}|ViT|ResNet|word2vec|Word2Vec)\b", q)
+    if acronym_match and acronym_match.group(1).lower() not in {"what", "who", "when", "how", "why"}:
+        return acronym_match.group(1)
+
+    # 2. Known multi-word canonical method phrases
+    method_phrases = [
+        "generative adversarial networks",
+        "generative adversarial network",
+        "batch normalization",
+        "layer normalization",
+        "vision transformer",
+        "vision transformers",
+        "retrieval-augmented generation",
+        "retrieval augmented generation",
+        "self-attention",
+        "multi-head attention",
+        "residual networks",
+        "residual network",
+        "deep residual learning",
+    ]
+    lower_q = q.lower()
+    for phrase in method_phrases:
+        if phrase in lower_q:
+            return phrase
+
+    # 3. Capitalized technical names (not sentence-initial), e.g. "Transformer", "Adam", "Dropout"
+    tokens = re.findall(r"\b[A-Za-z0-9_\-]+\b", q)
+    for i, tok in enumerate(tokens):
+        if i == 0:
+            continue
+        if tok[0].isupper() and tok.lower() not in _DISTINCTIVE_STOP_WORDS:
+            if i + 1 < len(tokens) and tokens[i+1][0].isupper() and tokens[i+1].lower() not in _DISTINCTIVE_STOP_WORDS:
+                return f"{tok} {tokens[i+1]}"
+            return tok
+
+    # 4. Fallback: take meaningful non-stop word
+    meaningful = [t for t in tokens if t.lower() not in _DISTINCTIVE_STOP_WORDS and len(t) > 2]
+    if meaningful:
+        return " ".join(meaningful[:2])
+
+    return None
+
+
+def reconstruct_abstract_from_inverted_index(inv: Optional[dict]) -> str:
+    """Reconstruct human-readable abstract text from OpenAlex abstract_inverted_index."""
+    if not inv or not isinstance(inv, dict):
+        return ""
+    words_positions: list[tuple[int, str]] = []
+    for word, positions in inv.items():
+        if isinstance(positions, list):
+            for pos in positions:
+                words_positions.append((pos, word))
+    words_positions.sort(key=lambda x: x[0])
+    return " ".join(w for _, w in words_positions)
+
+
+def _parse_openalex_work(w: dict) -> Optional[Paper]:
+    """Parse one OpenAlex work item into a Paper schema."""
+    if not isinstance(w, dict):
+        return None
+    title = (w.get("title") or "").strip()
+    if not title:
+        return None
+
+    raw_id = (w.get("id") or "").split("/")[-1]
+    paper_id = f"openalex-{raw_id}" if raw_id else f"openalex-{uuid.uuid4().hex[:10]}"
+
+    authors: list[str] = []
+    for a in (w.get("authorships") or []):
+        if isinstance(a, dict):
+            author_obj = a.get("author")
+            if isinstance(author_obj, dict):
+                name = (author_obj.get("display_name") or "").strip()
+                if name:
+                    authors.append(name)
+    if not authors:
+        authors = ["Unknown"]
+
+    pub_year = w.get("publication_year") or 2024
+
+    venue = "OpenAlex"
+    primary_loc = w.get("primary_location")
+    if isinstance(primary_loc, dict):
+        source_obj = primary_loc.get("source")
+        if isinstance(source_obj, dict):
+            venue = (source_obj.get("display_name") or "").strip() or "OpenAlex"
+
+    doi = (w.get("doi") or "").strip()
+    if doi.startswith("https://doi.org/"):
+        doi = doi[len("https://doi.org/"):].strip()
+    elif doi.startswith("http://doi.org/"):
+        doi = doi[len("http://doi.org/"):].strip()
+
+    abstract = reconstruct_abstract_from_inverted_index(w.get("abstract_inverted_index"))
+
+    arxiv_id = None
+    ids_obj = w.get("ids")
+    if isinstance(ids_obj, dict) and ids_obj.get("arxiv"):
+        raw_ar = ids_obj["arxiv"]
+        if "/abs/" in raw_ar:
+            arxiv_id = raw_ar.split("/abs/")[-1].strip()
+        elif raw_ar.lower().startswith("arxiv:"):
+            arxiv_id = raw_ar[6:].strip()
+        else:
+            arxiv_id = raw_ar.strip()
+
+    if not arxiv_id:
+        for loc in (w.get("locations") or []):
+            if isinstance(loc, dict):
+                url = loc.get("landing_page_url") or ""
+                if "arxiv.org/abs/" in url:
+                    arxiv_id = url.split("arxiv.org/abs/")[-1].strip()
+                    break
+                if "10.48550/arxiv." in url.lower():
+                    arxiv_id = url.lower().split("10.48550/arxiv.")[-1].strip()
+                    break
+
+    if arxiv_id:
+        arxiv_id = re.sub(r"v\d+$", "", arxiv_id)
+
+    # PDF URL safely
+    pdf_url = None
+    open_access = w.get("open_access")
+    if isinstance(open_access, dict):
+        pdf_url = open_access.get("oa_url")
+    if not pdf_url:
+        best_oa = w.get("best_oa_location")
+        if isinstance(best_oa, dict):
+            pdf_url = best_oa.get("pdf_url")
+    if not pdf_url and isinstance(primary_loc, dict):
+        pdf_url = primary_loc.get("pdf_url")
+    if not pdf_url and arxiv_id:
+        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+
+    citation_count = w.get("cited_by_count") or 0
+
+    return Paper(
+        id=paper_id,
+        title=title,
+        authors=authors,
+        publicationYear=pub_year,
+        journalConference=venue,
+        doi=doi or (f"10.48550/arXiv.{arxiv_id}" if arxiv_id else ""),
+        source="OpenAlex",
+        abstract=abstract,
+        pdfUrl=pdf_url,
+        citationCount=citation_count,
+        evidenceCount=0,
+    )
+
+
+async def _fetch_openalex_query(query: str, limit: int = 50) -> list[Paper]:
+    """Fetch top papers from OpenAlex sorted by cited_by_count descending."""
+    clean_q = query.strip()
+    if not clean_q:
+        return []
+
+    cached = _get_cached_response("openalex", clean_q)
+    if cached is not None:
+        return [Paper(**item) for item in cached]
+
+    params = {
+        "search": clean_q,
+        "sort": "cited_by_count:desc",
+        "per_page": min(limit, 50),
+        "mailto": getattr(settings, "OPENALEX_EMAIL", "researchlens.tool@gmail.com"),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(OPENALEX_API, params=params)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("results", [])
+                papers: list[Paper] = []
+                for w in results:
+                    p = _parse_openalex_work(w)
+                    if p:
+                        papers.append(p)
+
+                logger.info("[OpenAlex] Query '%s' (cited_by_count:desc) -> %d papers", clean_q[:50], len(papers))
+                if papers:
+                    _set_cached_response("openalex", clean_q, [p.model_dump() for p in papers])
+                return papers
+            else:
+                msg = f"OpenAlex HTTP {resp.status_code} for query '{clean_q[:50]}'"
+                logger.warning("[OpenAlex] %s", msg)
+                _record_retrieval_error(msg)
+    except Exception as exc:
+        msg = f"OpenAlex error querying '{clean_q[:50]}': {exc}"
+        logger.warning("[OpenAlex] %s", msg)
+        _record_retrieval_error(msg)
+
+    return []
+
+
+async def enrich_papers_with_openalex(papers: list[Paper]) -> list[Paper]:
+    """
+    Enriches candidate papers that lack citationCount by querying OpenAlex by arXiv ID or DOI.
+    """
+    uncited = [p for p in papers if getattr(p, "citationCount", 0) <= 0]
+    if not uncited:
+        return papers
+
+    lookup_map: dict[str, list[Paper]] = {}
+    arxiv_filter_urls: list[str] = []
+    doi_filter_urls: list[str] = []
+
+    for p in uncited:
+        aid = _extract_s2_batch_id(p)  # returns 'ARXIV:...' or 'DOI:...'
+        if aid and aid.startswith("ARXIV:"):
+            clean_aid = aid[len("ARXIV:"):].strip()
+            key_url = f"https://doi.org/10.48550/arxiv.{clean_aid}"
+            lookup_map.setdefault(key_url, []).append(p)
+            lookup_map.setdefault(clean_aid.lower(), []).append(p)
+            if key_url not in arxiv_filter_urls:
+                arxiv_filter_urls.append(key_url)
+        elif aid and aid.startswith("DOI:"):
+            clean_doi = aid[len("DOI:"):].strip()
+            key_url = f"https://doi.org/{clean_doi}"
+            lookup_map.setdefault(key_url, []).append(p)
+            lookup_map.setdefault(clean_doi.lower(), []).append(p)
+            if key_url not in doi_filter_urls:
+                doi_filter_urls.append(key_url)
+
+    if not lookup_map:
+        return papers
+
+    email = getattr(settings, "OPENALEX_EMAIL", "researchlens.tool@gmail.com")
+    enriched_count = 0
+
+    # Batch query OpenAlex by locations.landing_page_url for arXiv papers
+    batch_size = 25
+    for i in range(0, len(arxiv_filter_urls), batch_size):
+        chunk = arxiv_filter_urls[i : i + batch_size]
+        f = "locations.landing_page_url:" + "|".join(chunk)
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(OPENALEX_API, params={"filter": f, "mailto": email, "per_page": 50})
+                if resp.status_code == 200:
+                    for w in resp.json().get("results", []):
+                        c_count = w.get("cited_by_count") or 0
+                        inv = w.get("abstract_inverted_index")
+                        abstract = reconstruct_abstract_from_inverted_index(inv) if inv else ""
+                        venue = None
+                        prim = w.get("primary_location")
+                        if isinstance(prim, dict):
+                            src = prim.get("source")
+                            if isinstance(src, dict):
+                                venue = src.get("display_name")
+                        doi_val = w.get("doi") or ""
+
+                        matched_targets: list[Paper] = []
+                        for loc in (w.get("locations") or []):
+                            if isinstance(loc, dict):
+                                u = loc.get("landing_page_url") or ""
+                                if u in lookup_map:
+                                    matched_targets.extend(lookup_map[u])
+                        for aid_val in lookup_map:
+                            if any(aid_val in (loc.get("landing_page_url") or "") for loc in (w.get("locations") or []) if isinstance(loc, dict)):
+                                matched_targets.extend(lookup_map[aid_val])
+
+                        seen_ids: set[str] = set()
+                        unique_targets: list[Paper] = []
+                        for target in matched_targets:
+                            if target.id not in seen_ids:
+                                seen_ids.add(target.id)
+                                unique_targets.append(target)
+
+                        for target in unique_targets:
+                            if c_count > target.citationCount:
+                                target.citationCount = c_count
+                                enriched_count += 1
+                            if not target.abstract and abstract:
+                                target.abstract = abstract
+                            if venue and target.journalConference in ("arXiv", "Semantic Scholar", "OpenAlex", "unknown", ""):
+                                target.journalConference = venue
+                            if not target.doi and doi_val:
+                                target.doi = doi_val.replace("https://doi.org/", "")
+        except Exception as exc:
+            logger.warning("[OpenAlex-Enrichment] Failed arXiv batch lookup: %s", exc)
+
+    # Batch query OpenAlex by doi for DOI papers
+    for i in range(0, len(doi_filter_urls), batch_size):
+        chunk = doi_filter_urls[i : i + batch_size]
+        f = "doi:" + "|".join(chunk)
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(OPENALEX_API, params={"filter": f, "mailto": email, "per_page": 50})
+                if resp.status_code == 200:
+                    for w in resp.json().get("results", []):
+                        c_count = w.get("cited_by_count") or 0
+                        doi_val = (w.get("doi") or "").lower()
+                        for target in lookup_map.get(doi_val, []):
+                            if c_count > target.citationCount:
+                                target.citationCount = c_count
+                                enriched_count += 1
+        except Exception as exc:
+            logger.warning("[OpenAlex-Enrichment] Failed DOI batch lookup: %s", exc)
+
+    logger.info("[OpenAlex-Enrichment] Enriched %d / %d uncited papers with OpenAlex citation counts", enriched_count, len(uncited))
+    return papers
+
+
 # ─── Main Retrieval Entry Point ───────────────────────────────────────────────
 
 async def retrieve_candidate_papers(
@@ -606,7 +966,7 @@ async def retrieve_candidate_papers(
     plan: Optional[QueryPlan] = None,
 ) -> tuple[list[Paper], QueryPlan]:
     """
-    Retrieves candidates from arXiv and Semantic Scholar across planned queries.
+    Retrieves candidates from arXiv, OpenAlex, and Semantic Scholar across planned queries.
     Returns merged candidate list and the query plan used.
     """
     if plan is None:
@@ -619,41 +979,90 @@ async def retrieve_candidate_papers(
     q_type = plan.get("question_type", "literature_review") if plan else "literature_review"
     s2_limit = 100 if q_type == "factual_lookup" else fetch_limit
 
-    tasks = []
-
     valid_guesses = validate_title_guesses(plan.get("title_guesses", []))
+    source_values = [s.value if hasattr(s, "value") else str(s) for s in sources]
+
+    arxiv_candidates: list[Paper] = []
+    openalex_candidates: list[Paper] = []
+    s2_candidates: list[Paper] = []
 
     # 1. arXiv queries
-    if ResearchSource.ARXIV in sources or "arXiv" in [s.value if hasattr(s, "value") else s for s in sources]:
-        # Search valid title guesses first with ti:"..."
+    if ResearchSource.ARXIV in sources or "arXiv" in source_values:
+        arxiv_tasks = []
         for title in valid_guesses:
             clean_title = re.sub(r'["\']', '', title).strip()
             if clean_title:
-                tasks.append(_fetch_arxiv_query(f'ti:"{clean_title}"', fetch_limit))
-
-        # Search planned queries
+                arxiv_tasks.append(_fetch_arxiv_query(f'ti:"{clean_title}"', fetch_limit))
         for q in plan.get("queries", []):
             phrase = re.sub(r'["\']', '', q).strip()
             if phrase:
-                tasks.append(_fetch_arxiv_query(f'all:"{phrase}"', fetch_limit))
+                arxiv_tasks.append(_fetch_arxiv_query(f'all:"{phrase}"', fetch_limit))
+        if arxiv_tasks:
+            arxiv_results = await asyncio.gather(*arxiv_tasks, return_exceptions=True)
+            for r in arxiv_results:
+                if isinstance(r, list):
+                    arxiv_candidates.extend(r)
 
-    # 2. Semantic Scholar queries
-    if ResearchSource.SEMANTIC_SCHOLAR in sources or "Semantic Scholar" in [s.value if hasattr(s, "value") else s for s in sources]:
-        for q in plan.get("queries", [])[:2]:
-            tasks.append(_fetch_semantic_scholar_query(q, s2_limit))
-        for title in valid_guesses:
-            tasks.append(_fetch_semantic_scholar_query(title, s2_limit))
+    # 2. OpenAlex queries (sorted by cited_by_count:desc, top 50 per query)
+    if ResearchSource.OPENALEX in sources or "OpenAlex" in source_values:
+        openalex_queries: list[str] = []
+        distinctive_term = extract_distinctive_term(question)
+        if distinctive_term and distinctive_term not in openalex_queries:
+            openalex_queries.append(distinctive_term)
+        for g in valid_guesses:
+            if g not in openalex_queries:
+                openalex_queries.append(g)
+        for q in plan.get("queries", []):
+            if q not in openalex_queries:
+                openalex_queries.append(q)
 
-    # Run tasks concurrently
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+        openalex_tasks = [_fetch_openalex_query(oq, limit=50) for oq in openalex_queries]
+        if openalex_tasks:
+            openalex_results = await asyncio.gather(*openalex_tasks, return_exceptions=True)
+            for r in openalex_results:
+                if isinstance(r, list):
+                    openalex_candidates.extend(r)
 
-    candidates: list[Paper] = []
-    for r in results:
-        if isinstance(r, list):
-            candidates.extend(r)
+    # 3. Semantic Scholar queries (one at a time, sequential, max 6 if authenticated, 3 if unauthenticated)
+    if ResearchSource.SEMANTIC_SCHOLAR in sources or "Semantic Scholar" in source_values:
+        s2_queries_list: list[str] = []
+        for g in valid_guesses:
+            if g not in s2_queries_list:
+                s2_queries_list.append(g)
+        for q in plan.get("queries", []):
+            if q not in s2_queries_list:
+                s2_queries_list.append(q)
 
-    logger.info("[Retrieval] Raw candidates retrieved across %d calls: %d", len(tasks), len(candidates))
-    return candidates, plan
+        is_authenticated = bool(settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
+        max_s2_search_calls = 6 if is_authenticated else 3
+        s2_queries_to_run = s2_queries_list[:max_s2_search_calls]
+        for s2_q in s2_queries_to_run:
+            try:
+                s2_res = await _fetch_semantic_scholar_query(s2_q, s2_limit)
+                if s2_res:
+                    s2_candidates.extend(s2_res)
+            except Exception as exc:
+                msg = f"Semantic Scholar call failed for '{s2_q[:40]}': {exc}"
+                logger.warning("[S2] %s", msg)
+                _record_retrieval_error(msg)
+
+    # Log candidates per source and how many came from citation-sorted path
+    logger.info(
+        "[Retrieval] Candidates per source: arXiv=%d, Semantic Scholar=%d, OpenAlex=%d (citation-sorted: %d)",
+        len(arxiv_candidates),
+        len(s2_candidates),
+        len(openalex_candidates),
+        len(openalex_candidates),
+    )
+
+    # Merge into candidate pool BEFORE dedupe and enrichment
+    all_raw_candidates: list[Paper] = []
+    all_raw_candidates.extend(arxiv_candidates)
+    all_raw_candidates.extend(openalex_candidates)
+    all_raw_candidates.extend(s2_candidates)
+
+    logger.info("[Retrieval] Total raw candidates merged: %d", len(all_raw_candidates))
+    return all_raw_candidates, plan
 
 
 async def retrieve_papers(

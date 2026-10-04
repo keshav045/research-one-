@@ -85,23 +85,24 @@ def fallback_query_planner(question: str) -> QueryPlan:
     sub_questions = [question.strip()]
 
     # Seed list of well-known papers for deterministic fallback guidance;
-    # not the planner's main logic. Uses regex word boundaries to avoid false positives (e.g. Albert, Robert, Colorado).
-    lower_q = question.lower()
-    if re.search(r"\btransformer\b", lower_q):
-        queries.append("Attention Is All You Need Vaswani")
-        queries.append("transformer self-attention")
-        title_guesses.append("Attention Is All You Need")
-    elif re.search(r"\bbert\b", lower_q):
-        queries.append("BERT Pre-training Deep Bidirectional Devlin")
-        queries.append("masked language model BERT")
-        title_guesses.append("BERT: Pre-training of Deep Bidirectional Transformers")
-    elif re.search(r"\b(resnet|residual)\b", lower_q):
-        queries.append("Deep Residual Learning Image Recognition He")
-        queries.append("residual networks skip connection")
-        title_guesses.append("Deep Residual Learning for Image Recognition")
-    elif re.search(r"\blora\b", lower_q):
-        queries.append("LoRA Low-Rank Adaptation Large Language Models Hu")
-        title_guesses.append("LoRA: Low-Rank Adaptation of Large Language Models")
+    # not the planner's main logic. Disabled when SEED_PAPERS_ENABLED=False.
+    if getattr(settings, "SEED_PAPERS_ENABLED", True):
+        lower_q = question.lower()
+        if re.search(r"\btransformer\b", lower_q):
+            queries.append("Attention Is All You Need Vaswani")
+            queries.append("transformer self-attention")
+            title_guesses.append("Attention Is All You Need")
+        elif re.search(r"\bbert\b", lower_q):
+            queries.append("BERT Pre-training Deep Bidirectional Devlin")
+            queries.append("masked language model BERT")
+            title_guesses.append("BERT: Pre-training of Deep Bidirectional Transformers")
+        elif re.search(r"\b(resnet|residual)\b", lower_q):
+            queries.append("Deep Residual Learning Image Recognition He")
+            queries.append("residual networks skip connection")
+            title_guesses.append("Deep Residual Learning for Image Recognition")
+        elif re.search(r"\blora\b", lower_q):
+            queries.append("LoRA Low-Rank Adaptation Large Language Models Hu")
+            title_guesses.append("LoRA: Low-Rank Adaptation of Large Language Models")
 
     # Add generic cleaned keyword query
     if keywords:

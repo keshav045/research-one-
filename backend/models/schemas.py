@@ -21,6 +21,7 @@ class ResearchDepth(str, Enum):
 class ResearchSource(str, Enum):
     ARXIV = "arXiv"
     SEMANTIC_SCHOLAR = "Semantic Scholar"
+    OPENALEX = "OpenAlex"
     UPLOADED = "Uploaded Papers"
 
 
@@ -241,7 +242,7 @@ class StartResearchRequest(BaseModel):
     question: str = Field(..., min_length=10, max_length=500)
     depth: ResearchDepth = ResearchDepth.STANDARD
     sources: list[ResearchSource] = Field(
-        default=[ResearchSource.ARXIV, ResearchSource.SEMANTIC_SCHOLAR]
+        default=[ResearchSource.ARXIV, ResearchSource.SEMANTIC_SCHOLAR, ResearchSource.OPENALEX]
     )
 
 

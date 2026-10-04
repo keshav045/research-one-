@@ -11,7 +11,7 @@ export const ResearchHome: React.FC<ResearchHomeProps> = ({ onStartResearch }) =
     "Compare the performance and computational requirements of different Vision Transformer architectures for industrial defect detection."
   );
   const [depth, setDepth] = useState<ResearchDepth>('Standard');
-  const [sources, setSources] = useState<ResearchSource[]>(['arXiv', 'Semantic Scholar']);
+  const [sources, setSources] = useState<ResearchSource[]>(['arXiv', 'Semantic Scholar', 'OpenAlex']);
 
   const exampleQuestions = [
     "Compare RAG architectures for enterprise document search.",
@@ -100,6 +100,7 @@ export const ResearchHome: React.FC<ResearchHomeProps> = ({ onStartResearch }) =
                 {([
                   { id: 'arXiv' as ResearchSource, name: 'arXiv' },
                   { id: 'Semantic Scholar' as ResearchSource, name: 'Semantic Scholar' },
+                  { id: 'OpenAlex' as ResearchSource, name: 'OpenAlex' },
                 ]).map(src => {
                   const checked = sources.includes(src.id);
                   return (

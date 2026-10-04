@@ -29,11 +29,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("researchlens")
 
-# ── Load .env from backend directory ──────────────────────────────────────────
+# ── Load .env from backend and root directories ──────────────────────────────
 from dotenv import load_dotenv
-_env_path = Path(__file__).parent / ".env"
-if _env_path.exists():
-    load_dotenv(_env_path)
+_root_env = Path(__file__).parent.parent / ".env"
+_backend_env = Path(__file__).parent / ".env"
+if _root_env.exists():
+    load_dotenv(_root_env)
+if _backend_env.exists():
+    load_dotenv(_backend_env, override=True)
 else:
     load_dotenv(Path(__file__).parent / ".env.example")
 
@@ -47,6 +50,7 @@ from .routers.research import router as research_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("=== ResearchLens Backend starting ===")
+    logger.info("S2 key loaded: %s", bool(settings.SEMANTIC_SCHOLAR_API_KEY.strip()))
     logger.info("Database: %s", settings.DATABASE_URL)
     logger.info("Gemini configured: %s", settings.is_gemini_configured)
     logger.info("NLI model: %s", settings.NLI_MODEL)

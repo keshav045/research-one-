@@ -7,9 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        # Anchor to this file's directory so the correct backend/.env is loaded
-        # regardless of what CWD uvicorn was launched from.
-        env_file=str(Path(__file__).parent / ".env"),
+        # Load backend/.env first, then root .env if keys exist there
+        env_file=(str(Path(__file__).parent / ".env"), str(Path(__file__).parent.parent / ".env")),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -35,6 +34,13 @@ class Settings(BaseSettings):
 
     # Semantic Scholar
     SEMANTIC_SCHOLAR_API_KEY: str = ""
+
+    # OpenAlex Polite Pool
+    OPENALEX_EMAIL: str = "researchlens.tool@gmail.com"
+
+    # Feature Flags
+    SEED_PAPERS_ENABLED: bool = True
+    DISABLE_CACHE: bool = False
 
     # Database
     DATABASE_URL: str = "sqlite:///./researchlens.db"
