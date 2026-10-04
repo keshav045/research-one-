@@ -103,6 +103,11 @@ export interface ComparisonRow {
   parametersM: string;
   gflops: string;
   citationId: string;
+  title?: string;
+  authors?: string;
+  year?: string;
+  venue?: string;
+  citationCount?: string;
 }
 
 export interface ContradictionIssue {

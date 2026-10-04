@@ -45,31 +45,25 @@ export function exportReportToPdf(investigation: ResearchInvestigation) {
 
   const comparisonTableHtml = r.comparisonTable?.length ? `
     <section>
-      <h2>Performance Comparison</h2>
+      <h2>Paper Metadata Comparison</h2>
       <table style="width:100%; border-collapse:collapse; margin-top:8px; font-size:8.5pt;">
         <thead>
           <tr style="background:#f4f4f5; text-align:left; border-bottom:1px solid #ddd;">
-            <th style="padding:6px;">Method / Model</th>
-            <th style="padding:6px;">Approach</th>
-            <th style="padding:6px;">Dataset</th>
-            <th style="padding:6px;">Quality Impact</th>
-            <th style="padding:6px;">Comp. Ratio</th>
-            <th style="padding:6px;">Speedup</th>
-            <th style="padding:6px;">Memory</th>
-            <th style="padding:6px;">Compute</th>
+            <th style="padding:6px;">Paper / Title</th>
+            <th style="padding:6px;">Authors</th>
+            <th style="padding:6px;">Year</th>
+            <th style="padding:6px;">Venue</th>
+            <th style="padding:6px; text-align:right;">Citations</th>
           </tr>
         </thead>
         <tbody>
           ${r.comparisonTable.map(row => `
             <tr style="border-bottom:1px solid #eee;">
-              <td style="padding:6px; font-weight:600;">${esc(row.model)}</td>
-              <td style="padding:6px; color:#555;">${esc(row.architectureType)}</td>
-              <td style="padding:6px; font-family:monospace; font-size:8pt;">${esc(row.dataset)}</td>
-              <td style="padding:6px; font-weight:600;">${esc(row.f1Score)}</td>
-              <td style="padding:6px;">${esc(row.mapScore)}</td>
-              <td style="padding:6px;">${esc(row.fpsThroughput)}</td>
-              <td style="padding:6px; color:#555;">${esc(row.parametersM)}</td>
-              <td style="padding:6px; color:#555;">${esc(row.gflops)}</td>
+              <td style="padding:6px; font-weight:600;">${esc(row.title || row.model)}</td>
+              <td style="padding:6px; color:#555;">${esc(row.authors || row.architectureType)}</td>
+              <td style="padding:6px; font-family:monospace; font-size:8pt;">${esc(row.year || row.dataset)}</td>
+              <td style="padding:6px; color:#555;">${esc(row.venue || row.f1Score)}</td>
+              <td style="padding:6px; text-align:right; font-family:monospace;">${esc(row.citationCount || row.mapScore)}</td>
             </tr>
           `).join('')}
         </tbody>

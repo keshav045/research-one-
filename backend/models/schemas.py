@@ -174,14 +174,19 @@ class Citation(BaseModel):
 
 class ComparisonRow(BaseModel):
     model: str
-    architectureType: str
-    dataset: str
-    f1Score: str
-    mapScore: str
-    fpsThroughput: str
-    parametersM: str
-    gflops: str
-    citationId: str
+    architectureType: str = "Not extracted"
+    dataset: str = "Not extracted"
+    f1Score: str = "Not extracted"
+    mapScore: str = "Not extracted"
+    fpsThroughput: str = "Not extracted"
+    parametersM: str = "Not extracted"
+    gflops: str = "Not extracted"
+    citationId: str = ""
+    title: Optional[str] = None
+    authors: Optional[str] = None
+    year: Optional[str] = None
+    venue: Optional[str] = None
+    citationCount: Optional[str] = None
 
 
 class ReportParagraph(BaseModel):

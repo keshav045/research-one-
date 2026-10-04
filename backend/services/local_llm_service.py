@@ -297,40 +297,42 @@ def build_references_from_citations(papers: list[Paper], citations: list[Citatio
 
 
 def build_comparison_table(papers: list[Paper], citations: list[Citation]) -> list[ComparisonRow]:
-    """Constructs comparison rows from paper metadata."""
+    """Constructs comparison rows only from real metadata (title, authors, year, venue, citation count)."""
     rows: list[ComparisonRow] = []
     seen = set()
 
     for p in papers[:6]:
-        name = p.title.split(":")[0].strip() if ":" in p.title else p.title[:35].strip()
-        if name in seen:
+        if not p.title:
             continue
-        seen.add(name)
+        title = p.title.strip()
+        if title.lower() in seen:
+            continue
+        seen.add(title.lower())
 
         matched_cite = next((c for c in citations if c.paperId == p.id), None)
         cite_id = matched_cite.id if matched_cite else (citations[0].id if citations else "cite-1")
 
-        t_lower = p.title.lower()
-        if "transformer" in t_lower or "attention" in t_lower:
-            arch = "Transformer / Self-Attention"
-        elif "convolution" in t_lower or "cnn" in t_lower or "net" in t_lower:
-            arch = "Convolutional"
-        elif "diffusion" in t_lower:
-            arch = "Diffusion Model"
-        else:
-            arch = "Neural Network"
+        authors_str = ", ".join(p.authors) if p.authors else "Not extracted"
+        year_str = str(p.publicationYear) if p.publicationYear else "Not extracted"
+        venue_str = p.journalConference.strip() if (getattr(p, "journalConference", None) and p.journalConference.strip()) else "Not extracted"
+        cites_str = f"{p.citationCount:,}" if (getattr(p, "citationCount", None) is not None and p.citationCount >= 0) else "Not extracted"
 
         rows.append(
             ComparisonRow(
-                model=name,
-                architectureType=arch,
-                dataset="Standard Benchmarks",
-                f1Score="Empirical SOTA",
-                mapScore="N/A",
-                fpsThroughput="Optimized",
-                parametersM="Published",
-                gflops="Efficient",
+                model=title,
+                architectureType=authors_str,
+                dataset=year_str,
+                f1Score=venue_str,
+                mapScore=cites_str,
+                fpsThroughput="Not extracted",
+                parametersM="Not extracted",
+                gflops="Not extracted",
                 citationId=cite_id,
+                title=title,
+                authors=authors_str,
+                year=year_str,
+                venue=venue_str,
+                citationCount=cites_str,
             )
         )
     return rows
@@ -419,18 +421,39 @@ async def synthesize_report(
         )
     ]
 
-    conclusion = (
-        f"In summary, empirical literature analysis systematically addresses: \"{question}\". "
-        f"All asserted findings maintain verified sentence-level attribution with {integrity:.1%} citation integrity."
-    )
+    conclusion_parts = [
+        f"In summary, empirical literature analysis addresses: \"{question}\".",
+        f"Anchor paper confidence is {anchor_confidence}.",
+    ]
+
+    if integrity >= 1.0:
+        conclusion_parts.append("All findings verified with 100.0% citation integrity.")
+    else:
+        conclusion_parts.append(f"Findings verified with {integrity:.1%} citation integrity.")
+
+    warning_notes = []
+    if anchor_confidence == "uncertain":
+        if uncertainty_note:
+            warning_notes.append(uncertainty_note)
+        else:
+            warning_notes.append("Anchor paper selection is marked uncertain.")
+    if removed_details:
+        warning_notes.append(f"{len(removed_details)} claim sentence(s) removed due to lack of verifiable evidence.")
+    if retrieval_warnings:
+        warning_notes.extend(retrieval_warnings)
+
+    if warning_notes:
+        conclusion_parts.append(f"Warnings: {'; '.join(warning_notes)}.")
+
+    conclusion = " ".join(conclusion_parts)
 
     report = ResearchReport(
         executiveSummary=verified_answer,
         methodology=methodology,
         findings=findings,
         comparisonTable=comparison_table,
-        computationalRequirements="Hardware budgets and execution profiles conform to published configurations.",
-        contradictoryEvidence="No unresolved empirical contradictions were observed across the verified evidence.",
+        computationalRequirements="",
+        contradictoryEvidence="",
         limitations=limitations,
         conclusion=conclusion,
         references=references,
