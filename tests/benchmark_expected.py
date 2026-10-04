@@ -93,12 +93,6 @@ def _extract_paper_arxiv(paper: Any) -> Optional[str]:
         raw = pid[len("arxiv-"):].strip()
         return re.sub(r"v\d+$", "", raw)
 
-    # Check paper.pdfUrl
-    pdf_url = getattr(paper, "pdfUrl", None) or ""
-    if "arxiv.org/pdf/" in pdf_url.lower():
-        raw = pdf_url.lower().split("arxiv.org/pdf/")[-1].replace(".pdf", "").strip()
-        return re.sub(r"v\d+$", "", raw)
-
     return None
 
 
