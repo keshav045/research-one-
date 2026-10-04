@@ -436,6 +436,9 @@ async def synthesize_report(
         anchor_paper=anchor_paper,
         first_sentence=first_sentence,
     )
+    if debug_info is not None:
+        debug_info["verified_sentences"] = verified_details
+        debug_info["removed_sentences"] = removed_details
 
     # 3. Build structured sections from metadata
     methodology = build_methodology_from_stats(
