@@ -314,8 +314,8 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
 
         anchor_paper = None
         anchor_debug: dict[str, Any] = {"anchor_paper_id": None, "reason": "not_factual_lookup"}
-        if q_type == "factual_lookup" and title_guesses:
-            anchor_paper, enriched_candidates, anchor_debug = select_anchor_paper(enriched_candidates, title_guesses)
+        if q_type == "factual_lookup":
+            anchor_paper, enriched_candidates, anchor_debug = await select_anchor_paper(enriched_candidates, title_guesses, question=question)
 
         # 3. Rank papers and cut to top N AFTER enrichment
         ranked_papers = rank_papers(

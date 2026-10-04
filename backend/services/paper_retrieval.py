@@ -366,6 +366,8 @@ async def _fetch_s2_with_retry(query: str, limit: int, headers: dict) -> list[Pa
                     "fields": S2_FIELDS,
                     "openAccessPdf": "",
                 }
+                if getattr(settings, "DEFAULT_FIELDS_OF_STUDY", ""):
+                    params["fieldsOfStudy"] = settings.DEFAULT_FIELDS_OF_STUDY.strip()
                 resp = await client.get(S2_SEARCH_API, params=params, headers=headers)
                 dur_ms = int((time.time() - t0) * 1000)
 
@@ -814,16 +816,28 @@ async def _fetch_openalex_query(query: str, limit: int = 50) -> list[Paper]:
     if cached is not None:
         return [Paper(**item) for item in cached]
 
+    filter_val = getattr(settings, "OPENALEX_FIELD_FILTER", "")
     params = {
         "search": clean_q,
         "sort": "cited_by_count:desc",
         "per_page": min(limit, 50),
         "mailto": getattr(settings, "OPENALEX_EMAIL", "researchlens.tool@gmail.com"),
     }
+    if filter_val:
+        params["filter"] = filter_val
+    if getattr(settings, "OPENALEX_API_KEY", "") and settings.OPENALEX_API_KEY.strip():
+        params["api_key"] = settings.OPENALEX_API_KEY.strip()
+
+    # Exact sanitized URL for diagnosis logging (no email or api key)
+    safe_params = [f"search={clean_q}", "sort=cited_by_count:desc", f"per_page={min(limit, 50)}"]
+    if filter_val:
+        safe_params.append(f"filter={filter_val}")
+    diag_url = f"{OPENALEX_API}?{'&'.join(safe_params)}"
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(OPENALEX_API, params=params)
+            logger.info("[OpenAlex] Request URL: '%s' -> HTTP %d", diag_url, resp.status_code)
             if resp.status_code == 200:
                 data = resp.json()
                 results = data.get("results", [])

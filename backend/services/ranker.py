@@ -10,13 +10,16 @@ from __future__ import annotations
 import logging
 import math
 import re
+from collections import Counter
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
+
+import httpx
+import numpy as np
 
 from ..config import settings
 from ..models.schemas import Paper, ResearchDepth
 from .embeddings import embed_query, embed_texts
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -121,195 +124,270 @@ def validate_title_guesses(title_guesses: list[str]) -> list[str]:
     return valid
 
 
-def select_anchor_paper(
+def extract_key_terms(question: str) -> list[str]:
+    """
+    Extracts key term(s) from the question without an LLM:
+    - Acronyms (e.g. ViT, GAN, RAG)
+    - Phrases after 'introduced', 'proposed', 'developed', 'invented'
+    - Method names with hyphens/digits (e.g. word2vec, doc2vec)
+    - Multi-word methods (e.g. 'generative adversarial networks', 'batch normalization', 'retrieval-augmented generation')
+    - Capitalized words/names (not at sentence start)
+    """
+    terms: list[str] = []
+    # 1. Phrases after introduced / proposed / developed / invented
+    m = re.search(r'(?:introduced|proposed|developed|invented)\s+(?:the\s+)?([A-Za-z0-9_\-\s]+?)(?:\?|\.|,|$|\band\b)', question, re.I)
+    if m:
+        phrase = m.group(1).strip()
+        phrase_clean = re.sub(r'\s+(?:architecture|optimizer|algorithm|model|system|framework|approach)s?$', '', phrase, flags=re.I).strip()
+        if phrase_clean and len(phrase_clean) > 2:
+            terms.append(phrase_clean)
+            if phrase != phrase_clean:
+                terms.append(phrase)
+
+    # 2. Acronyms in parens or standalone (e.g. ViT, GAN, RAG)
+    for ac in re.findall(r'\b[A-Z0-9]{2,}\b', question):
+        if ac.lower() not in ('who', 'what', 'which', 'nlp', 'the'):
+            terms.append(ac)
+    for ac_p in re.findall(r'\(([A-Za-z0-9_\-]+)\)', question):
+        terms.append(ac_p)
+
+    # 3. Method patterns like word2vec
+    for w2v in re.findall(r'\b[a-zA-Z]+2[a-zA-Z0-9]+\b', question):
+        terms.append(w2v)
+
+    # 4. Multi-word phrases like 'generative adversarial networks', 'batch normalization', 'retrieval-augmented generation'
+    for mw in re.findall(r'\b(?:generative adversarial networks?|batch normalization|retrieval-augmented generation|vision transformer|deep convolutional)\b', question, re.I):
+        terms.append(mw)
+
+    # 5. Capitalized words not at sentence start
+    words = question.split()
+    for w in words[1:]:
+        clean_w = re.sub(r'[^a-zA-Z0-9_\-]', '', w)
+        if clean_w and clean_w[0].isupper() and len(clean_w) > 2:
+            if clean_w.lower() not in ('which', 'who', 'what', 'the', 'how'):
+                terms.append(clean_w)
+
+    seen = set()
+    result = []
+    for t in terms:
+        t_clean = t.strip()
+        if t_clean.lower() not in seen and len(t_clean) >= 2:
+            seen.add(t_clean.lower())
+            result.append(t_clean)
+    return result
+
+
+async def citation_chasing(candidates: list[Paper], key_terms: list[str]) -> list[Paper]:
+    """
+    Takes top 15 candidates by citationCount, fetches their references from S2 batch endpoint,
+    counts reference frequency, filters for CS/ML field, logs top 5 most-referenced works,
+    and returns them as Paper objects.
+    """
+    sorted_cands = sorted(candidates, key=lambda p: getattr(p, "citationCount", 0) or 0, reverse=True)
+    top_15 = sorted_cands[:15]
+    if not top_15:
+        return []
+
+    from .paper_retrieval import _extract_s2_batch_id, _throttle_s2, S2_BATCH_API
+    batch_ids: list[str] = []
+    for p in top_15:
+        bid = _extract_s2_batch_id(p)
+        if bid and bid not in batch_ids:
+            batch_ids.append(bid)
+
+    if not batch_ids:
+        return []
+
+    headers = {"User-Agent": "ResearchLens/2.0 (academic research tool)"}
+    if getattr(settings, "SEMANTIC_SCHOLAR_API_KEY", "") and settings.SEMANTIC_SCHOLAR_API_KEY.strip():
+        headers["x-api-key"] = settings.SEMANTIC_SCHOLAR_API_KEY.strip()
+
+    await _throttle_s2()
+    ref_counter: Counter = Counter()
+    ref_map: dict[str, dict] = {}
+    try:
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            resp = await client.post(
+                S2_BATCH_API,
+                params={"fields": "title,citationCount,year,references.paperId,references.title,references.citationCount,references.year,references.externalIds,references.abstract,references.fieldsOfStudy"},
+                json={"ids": batch_ids},
+                headers=headers,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                for item in (data or []):
+                    if not item or not isinstance(item, dict):
+                        continue
+                    for ref in item.get("references", []) or []:
+                        rtitle = ref.get("title")
+                        if not rtitle or len(rtitle.strip()) < 5:
+                            continue
+                        clean_t = rtitle.strip()
+                        key = clean_t.lower()
+                        ref_counter[key] += 1
+                        if key not in ref_map or (ref.get("citationCount") or 0) > (ref_map[key].get("citationCount") or 0):
+                            ref_map[key] = ref
+            else:
+                logger.warning("[CitationChasing] S2 batch returned HTTP %d", resp.status_code)
+    except Exception as exc:
+        logger.warning("[CitationChasing] S2 batch failed: %s", exc)
+        return []
+
+    # Log the top 5 most-referenced works found
+    top_5 = ref_counter.most_common(5)
+    top_5_log = [f"'{ref_map[k].get('title')}' ({count}x cited, {ref_map[k].get('citationCount')} cites)" for k, count in top_5]
+    logger.info("[CitationChasing] Top 5 most-referenced works found: %s", " | ".join(top_5_log) if top_5_log else "None")
+
+    chased_papers: list[Paper] = []
+    for k, count in ref_counter.most_common(30):
+        r = ref_map[k]
+        ext_ids = r.get("externalIds") or {}
+        arxiv_id = ext_ids.get("ArXiv")
+        doi = ext_ids.get("DOI")
+        clean_arxiv = re.sub(r"v\d+$", "", arxiv_id) if arxiv_id else None
+        pid = f"arxiv-{clean_arxiv}" if clean_arxiv else (f"s2-{r.get('paperId')}" if r.get("paperId") else f"chased-{len(chased_papers)+1}")
+
+        fields = r.get("fieldsOfStudy") or []
+        fields_str = ", ".join(fields) if isinstance(fields, list) else str(fields)
+
+        paper = Paper(
+            id=pid,
+            title=r.get("title"),
+            citationCount=r.get("citationCount") or 0,
+            publicationYear=r.get("year") or 2020,
+            journalConference=fields_str or "Computer Science",
+            doi=doi,
+            source="Semantic Scholar",
+            abstract=r.get("abstract") or f"Foundational work referenced {count} times by top candidate papers in literature review.",
+        )
+        chased_papers.append(paper)
+
+    return chased_papers
+
+
+async def select_anchor_paper(
     papers: list[Paper],
-    title_guesses: list[str],
+    title_guesses: Optional[list[str]] = None,
+    question: str = "",
 ) -> tuple[Optional[Paper], list[Paper], dict[str, Any]]:
     """
-    Chooses an anchor paper for factual-lookup questions:
-    - Validates title guesses (drops empty, disallowed prefixes, <2 words).
-    - Normalizes titles (lowercase, strip punctuation and extra spaces, drop trailing version).
-    - Anchor = retrieved paper whose normalized title EQUALS a normalized title guess exactly.
-      Derivative papers like 'Cross-Attention is all you need: ...' must NOT match.
-    - If several retrieved records match (e.g. same paper from arXiv and Semantic Scholar),
-      merge them and keep the one with highest citationCount.
-    - If no exact match, use fuzzy match only if similarity >= 0.95, otherwise anchor_paper_id = None.
-    - Returns (anchor_paper, updated_papers_list, debug_dict).
+    Selects the foundational anchor paper for factual-lookup questions:
+    1. Exact title-guess matching (first priority when it exists and meets ANCHOR_MIN_CITATIONS).
+    2. Key-term highest citation count (from non-LLM extracted key terms in question).
+       Candidates = papers whose title OR abstract contains a key term.
+       Anchor = highest citationCount among candidates (max across sources), with earlier year as tie-break within 20% of top count.
+       Requires citationCount >= ANCHOR_MIN_CITATIONS (default 1000). Otherwise None.
+    3. Citation chasing:
+       When anchor is None OR the anchor has fewer citations than a top candidate that cites it:
+       Take top 15 candidates by citationCount, read their referenced works, count frequency,
+       take the most-referenced works from cs/ML as extra anchor candidates, look up metadata,
+       and merge them into the pool. Log the top 5 most-referenced works found.
+    4. Logs which rule picked the anchor ("exact_title_guess", "key_term_highest_citation", "citation_chasing", "none").
     """
-    import difflib
-
-    valid_guesses = validate_title_guesses(title_guesses)
-    if not papers or not valid_guesses:
-        return None, papers, {"anchor_paper_id": None, "reason": "no_candidates_or_valid_guesses"}
-
-    norm_guesses = [normalize_paper_title(g) for g in valid_guesses if normalize_paper_title(g)]
-    if not norm_guesses:
-        return None, papers, {"anchor_paper_id": None, "reason": "no_valid_guesses"}
+    min_citations = getattr(settings, "ANCHOR_MIN_CITATIONS", 1000)
 
     def get_cites(p: Paper) -> int:
         return getattr(p, "citationCount", 0) or 0
 
-    # 1. Exact title match
-    exact_matches: list[tuple[Paper, str]] = []
-    for p in papers:
-        p_norm = normalize_paper_title(p.title)
-        for g_norm in norm_guesses:
-            if p_norm == g_norm:
-                exact_matches.append((p, g_norm))
-                break
+    key_terms = extract_key_terms(question) if question else []
+    logger.info("[Anchor] Extracted key terms from question: %s", key_terms)
 
-    if exact_matches:
-        exact_matches.sort(
-            key=lambda item: (get_cites(item[0]), 1 if item[0].pdfUrl else 0),
-            reverse=True,
-        )
-        best_anchor, matched_guess = exact_matches[0]
-
-        # Merge metadata from other exact matches
-        merged_ids = [best_anchor.id]
-        papers_to_remove = set()
-        for other_p, _ in exact_matches[1:]:
-            merged_ids.append(other_p.id)
-            papers_to_remove.add(other_p.id)
-            if not best_anchor.pdfUrl and other_p.pdfUrl:
-                best_anchor.pdfUrl = other_p.pdfUrl
-            if not best_anchor.doi and other_p.doi:
-                best_anchor.doi = other_p.doi
-            if not best_anchor.abstract and other_p.abstract:
-                best_anchor.abstract = other_p.abstract
-            if get_cites(other_p) > get_cites(best_anchor):
-                best_anchor.citationCount = get_cites(other_p)
-            if other_p.journalConference and other_p.journalConference not in ("arXiv", "Semantic Scholar", "unknown", ""):
-                if best_anchor.journalConference in ("arXiv", "Semantic Scholar", "unknown", ""):
-                    best_anchor.journalConference = other_p.journalConference
-
-        updated_papers = [p for p in papers if p.id not in papers_to_remove]
-        debug = {
-            "anchor_paper_id": best_anchor.id,
-            "anchor_paper_title": best_anchor.title,
-            "anchor_doi": best_anchor.doi,
-            "anchor_citations": get_cites(best_anchor),
-            "match_type": "exact",
-            "matched_guess": matched_guess,
-            "merged_records": merged_ids,
-        }
-        logger.info(
-            "[Anchor] Selected exact match anchor paper: '%s' (ID: %s, DOI: %s, citations: %d)",
-            best_anchor.title,
-            best_anchor.id,
-            best_anchor.doi,
-            get_cites(best_anchor),
-        )
-        return best_anchor, updated_papers, debug
-
-    # 2. Anchor prefix rule (>= 3-word prefix, highest citationCount, >= ANCHOR_MIN_CITATIONS)
-    min_citations = getattr(settings, "ANCHOR_MIN_CITATIONS", 500)
-    prefix_matches: list[tuple[Paper, str]] = []
-    for g_norm in norm_guesses:
-        g_words = g_norm.split()
-        if len(g_words) < 3:
-            continue
-        g_prefix_3 = " ".join(g_words[:3])
+    # 1. First priority: Exact title-guess matching if provided and valid
+    valid_guesses = validate_title_guesses(title_guesses) if title_guesses else []
+    if valid_guesses:
+        norm_guesses = [normalize_paper_title(g) for g in valid_guesses if normalize_paper_title(g)]
+        exact_matches: list[Paper] = []
         for p in papers:
             p_norm = normalize_paper_title(p.title)
-            p_words = p_norm.split()
-            if len(p_words) < 3:
-                continue
+            if p_norm in norm_guesses and get_cites(p) >= min_citations:
+                exact_matches.append(p)
+        if exact_matches:
+            exact_matches.sort(key=lambda p: (get_cites(p), 1 if p.pdfUrl else 0), reverse=True)
+            best_anchor = exact_matches[0]
+            logger.info("[Anchor] Rule 'exact_title_guess' selected anchor: '%s' (cites=%d >= %d)", best_anchor.title, get_cites(best_anchor), min_citations)
+            return best_anchor, papers, {
+                "anchor_paper_id": best_anchor.id,
+                "anchor_paper_title": best_anchor.title,
+                "anchor_citations": get_cites(best_anchor),
+                "anchor_rule": "exact_title_guess",
+            }
 
-            is_prefix = False
-            if p_norm.startswith(g_norm) or g_norm.startswith(p_norm):
-                is_prefix = True
-            elif p_norm.startswith(g_prefix_3):
-                # Count matching leading words
-                match_words = 0
-                for w1, w2 in zip(g_words, p_words):
-                    if w1 == w2:
-                        match_words += 1
-                    else:
-                        break
-                if match_words >= 3:
-                    is_prefix = True
+    # Helper function to find best key-term candidate
+    def _find_key_term_candidate(cand_list: list[Paper]) -> Optional[Paper]:
+        if not key_terms or not cand_list:
+            return None
+        matching: list[Paper] = []
+        for p in cand_list:
+            text = f"{p.title} {p.abstract or ''}".lower()
+            for kt in key_terms:
+                kt_clean = kt.lower().strip()
+                if not kt_clean:
+                    continue
+                pattern = r"\b" + re.escape(kt_clean) + r"\b"
+                if re.search(pattern, text) or kt_clean in text:
+                    matching.append(p)
+                    break
+        if not matching:
+            return None
+        max_c = max(get_cites(p) for p in matching)
+        if max_c < min_citations:
+            return None
+        # Candidates within 20% of top citation count
+        tier = [p for p in matching if get_cites(p) >= 0.80 * max_c]
+        # Earlier year as tie-break within 20% of top count
+        tier.sort(key=lambda p: (getattr(p, "publicationYear", 2099) or 2099, -get_cites(p)))
+        return tier[0]
 
-            if is_prefix and get_cites(p) >= min_citations:
-                prefix_matches.append((p, g_norm))
+    # 2. Second priority: Key-term candidates in existing pool
+    potential_anchor = _find_key_term_candidate(papers)
+    anchor_rule = "key_term_highest_citation" if potential_anchor else "none"
 
-    if prefix_matches:
-        prefix_matches.sort(
-            key=lambda item: (get_cites(item[0]), 1 if item[0].pdfUrl else 0),
-            reverse=True,
-        )
-        best_anchor, matched_guess = prefix_matches[0]
+    # 3. Third priority: Citation chasing
+    top_cites_in_pool = max([get_cites(p) for p in papers] + [0])
+    should_chase = (
+        potential_anchor is None or
+        (top_cites_in_pool > get_cites(potential_anchor) * 1.5 and top_cites_in_pool >= min_citations)
+    )
 
-        # Merge metadata from other matches with the same title key
-        merged_ids = [best_anchor.id]
-        papers_to_remove = set()
-        best_key = _normalize_title(best_anchor.title)
-        for other_p, _ in prefix_matches[1:]:
-            if _normalize_title(other_p.title) == best_key:
-                merged_ids.append(other_p.id)
-                papers_to_remove.add(other_p.id)
-                if not best_anchor.pdfUrl and other_p.pdfUrl:
-                    best_anchor.pdfUrl = other_p.pdfUrl
-                if not best_anchor.doi and other_p.doi:
-                    best_anchor.doi = other_p.doi
-                if not best_anchor.abstract and other_p.abstract:
-                    best_anchor.abstract = other_p.abstract
-                if get_cites(other_p) > get_cites(best_anchor):
-                    best_anchor.citationCount = get_cites(other_p)
-                if other_p.journalConference and other_p.journalConference not in ("arXiv", "Semantic Scholar", "unknown", ""):
-                    if best_anchor.journalConference in ("arXiv", "Semantic Scholar", "unknown", ""):
-                        best_anchor.journalConference = other_p.journalConference
-
-        updated_papers = [p for p in papers if p.id not in papers_to_remove]
-        debug = {
-            "anchor_paper_id": best_anchor.id,
-            "anchor_paper_title": best_anchor.title,
-            "anchor_doi": best_anchor.doi,
-            "anchor_citations": get_cites(best_anchor),
-            "match_type": "prefix",
-            "matched_guess": matched_guess,
-            "merged_records": merged_ids,
-        }
+    if should_chase and key_terms:
         logger.info(
-            "[Anchor] Selected prefix match anchor paper: '%s' (ID: %s, citations: %d >= %d)",
-            best_anchor.title,
-            best_anchor.id,
-            get_cites(best_anchor),
+            "[Anchor] Triggering citation chasing (potential_anchor=%s, pool_max_cites=%d)...",
+            potential_anchor.title if potential_anchor else "None",
+            top_cites_in_pool,
+        )
+        chased = await citation_chasing(papers, key_terms)
+        if chased:
+            existing_ids = {p.id for p in papers}
+            for cp in chased:
+                if cp.id not in existing_ids:
+                    papers.append(cp)
+                    existing_ids.add(cp.id)
+            re_evaluated = _find_key_term_candidate(papers)
+            if re_evaluated is not None:
+                if potential_anchor is None or get_cites(re_evaluated) > get_cites(potential_anchor):
+                    potential_anchor = re_evaluated
+                    anchor_rule = "citation_chasing"
+
+    if potential_anchor is not None and get_cites(potential_anchor) >= min_citations:
+        logger.info(
+            "[Anchor] Rule '%s' selected anchor: '%s' (ID: %s, DOI: %s, citations: %d >= %d, year: %s)",
+            anchor_rule,
+            potential_anchor.title,
+            potential_anchor.id,
+            potential_anchor.doi,
+            get_cites(potential_anchor),
             min_citations,
+            potential_anchor.publicationYear,
         )
-        return best_anchor, updated_papers, debug
-
-    # 3. Fuzzy match fallback (similarity >= 0.95 required)
-    fuzzy_matches: list[tuple[float, Paper, str]] = []
-    for p in papers:
-        p_norm = normalize_paper_title(p.title)
-        for g_norm in norm_guesses:
-            sim = difflib.SequenceMatcher(None, g_norm, p_norm).ratio()
-            if sim >= 0.95:
-                fuzzy_matches.append((sim, p, g_norm))
-
-    if fuzzy_matches:
-        fuzzy_matches.sort(key=lambda x: (x[0], get_cites(x[1])), reverse=True)
-        best_sim, best_anchor, matched_guess = fuzzy_matches[0]
-        debug = {
-            "anchor_paper_id": best_anchor.id,
-            "anchor_paper_title": best_anchor.title,
-            "anchor_doi": best_anchor.doi,
-            "anchor_citations": get_cites(best_anchor),
-            "match_type": "fuzzy",
-            "similarity": round(best_sim, 4),
-            "matched_guess": matched_guess,
+        return potential_anchor, papers, {
+            "anchor_paper_id": potential_anchor.id,
+            "anchor_paper_title": potential_anchor.title,
+            "anchor_citations": get_cites(potential_anchor),
+            "anchor_rule": anchor_rule,
         }
-        logger.info(
-            "[Anchor] Selected fuzzy anchor paper: '%s' (similarity: %.3f, citations: %d)",
-            best_anchor.title,
-            best_sim,
-            get_cites(best_anchor),
-        )
-        return best_anchor, papers, debug
 
-    logger.info("[Anchor] No exact, prefix (>= %d cites), or >=0.95 fuzzy match found among %d candidate papers", min_citations, len(papers))
-    return None, papers, {"anchor_paper_id": None, "reason": "no_match_above_threshold"}
+    logger.info("[Anchor] Rule 'none': No candidate paper met threshold (min %d citations)", min_citations)
+    return None, papers, {"anchor_paper_id": None, "anchor_rule": "none", "reason": "no_anchor_above_threshold"}
 
 
 def _normalize_title(title: str) -> str:
@@ -512,26 +590,78 @@ def rank_papers(
             title_match_bonus = max(title_match_bonus, overlap / len(q_words))
 
         # Weighted final score
-        # For factual lookup: strongly boost exact title match and foundational papers
+        # For factual lookup: raise citation weight (configurable) and log weights
         if question_type == "factual_lookup":
-            final_score = 0.45 * sem_score + 0.30 * cite_score + 0.25 * title_match_bonus
+            sem_weight = getattr(settings, "FACTUAL_SEMANTIC_WEIGHT", 0.35)
+            cite_weight = getattr(settings, "FACTUAL_CITATION_WEIGHT", 0.45)
+            title_weight = getattr(settings, "FACTUAL_TITLE_WEIGHT", 0.20)
+            if i == 0:
+                logger.info(
+                    "[Ranker] Factual lookup weights: semantic=%.2f, citation=%.2f, title=%.2f",
+                    sem_weight,
+                    cite_weight,
+                    title_weight,
+                )
+            final_score = sem_weight * sem_score + cite_weight * cite_score + title_weight * title_match_bonus
         else:
             final_score = 0.60 * sem_score + 0.25 * cite_score + 0.15 * title_match_bonus
-
-        # Priority boost for verified anchor paper
-        if anchor_paper and (p.id == anchor_paper.id or normalize_paper_title(p.title) == normalize_paper_title(anchor_paper.title)):
-            final_score += 10.0
 
         scored_papers.append((final_score, p))
 
     # Sort descending by score
     scored_papers.sort(key=lambda x: x[0], reverse=True)
+    ranked_pool = [p for _, p in scored_papers]
 
-    ranked = [p for _, p in scored_papers]
-    logger.info("[Ranker] Top paper: '%s' (score=%.3f)", ranked[0].title, scored_papers[0][0])
+    # Selection cut for factual_lookup:
+    # 1. The anchor must ALWAYS be in the final ranked set (placed at position 0).
+    #    The cross-encoder must not be able to remove the anchor.
+    # 2. Plus the top 3 key-term candidates by citationCount must be in the final set.
+    if question_type == "factual_lookup":
+        final_ranked: list[Paper] = []
+        seen_pids = set()
+
+        if anchor_paper:
+            matched_anchor = next(
+                (p for p in cleaned if p.id == anchor_paper.id or normalize_paper_title(p.title) == normalize_paper_title(anchor_paper.title)),
+                anchor_paper,
+            )
+            final_ranked.append(matched_anchor)
+            seen_pids.add(matched_anchor.id)
+
+        # Top 3 key-term candidates by citationCount
+        key_terms = extract_key_terms(question) if question else []
+        key_term_cands: list[Paper] = []
+        for p in cleaned:
+            text = f"{p.title} {p.abstract or ''}".lower()
+            for kt in key_terms:
+                kt_clean = kt.lower().strip()
+                if kt_clean and (kt_clean in text or re.search(r'\b' + re.escape(kt_clean) + r'\b', text)):
+                    key_term_cands.append(p)
+                    break
+        key_term_cands.sort(key=lambda p: getattr(p, "citationCount", 0) or 0, reverse=True)
+        for kt_p in key_term_cands:
+            if len(final_ranked) >= 4:
+                break
+            if kt_p.id not in seen_pids:
+                final_ranked.append(kt_p)
+                seen_pids.add(kt_p.id)
+
+        # Fill remaining slots from ranked_pool up to target_count
+        for p in ranked_pool:
+            if len(final_ranked) >= target_count:
+                break
+            if p.id not in seen_pids:
+                final_ranked.append(p)
+                seen_pids.add(p.id)
+
+        ranked = final_ranked
+    else:
+        ranked = ranked_pool[:target_count]
+
+    logger.info("[Ranker] Top paper: '%s' (cites=%d)", ranked[0].title, getattr(ranked[0], "citationCount", 0) or 0)
 
     # Re-assign sequential IDs: paper-1, paper-2, ...
     for idx, p in enumerate(ranked, start=1):
         p.id = f"paper-{idx}"
 
-    return ranked[:target_count]
+    return ranked

@@ -35,8 +35,13 @@ class Settings(BaseSettings):
     # Semantic Scholar
     SEMANTIC_SCHOLAR_API_KEY: str = ""
 
-    # OpenAlex Polite Pool
+    # OpenAlex Polite Pool & API Key
     OPENALEX_EMAIL: str = "researchlens.tool@gmail.com"
+    OPENALEX_API_KEY: str = ""
+    OPENALEX_FIELD_FILTER: str = "concepts.id:C41008148"
+
+    # Domain / Field of Study Filters
+    DEFAULT_FIELDS_OF_STUDY: str = "Computer Science"
 
     # Feature Flags
     SEED_PAPERS_ENABLED: bool = True
@@ -56,7 +61,13 @@ class Settings(BaseSettings):
     NLI_DEVICE: str = "cuda"
     NLI_ENTAIL_THRESHOLD: float = 0.80
     RELEVANCE_THRESHOLD: float = 0.30
-    ANCHOR_MIN_CITATIONS: int = 500
+    ANCHOR_MIN_CITATIONS: int = 1000
+
+    # Factual Lookup Ranking Weights
+    FACTUAL_SEMANTIC_WEIGHT: float = 0.35
+    FACTUAL_CITATION_WEIGHT: float = 0.45
+    FACTUAL_TITLE_WEIGHT: float = 0.20
+
     DEPTH_COUNTS: dict[str, int] = {"Quick": 6, "Standard": 12, "Deep": 24}
 
     # File system
