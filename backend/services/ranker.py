@@ -218,16 +218,16 @@ def _text_matches_key_term(text: str, key_term: str) -> bool:
 
 async def citation_chasing(
     candidates: list[Paper], key_terms: list[str]
-) -> tuple[list[Paper], Counter, dict[str, list[Paper]], list[Paper]]:
+) -> tuple[list[Paper], Counter, dict[str, list[Paper]]]:
     """
     Takes top 15 candidates by citationCount, fetches their references from S2 batch endpoint,
     counts reference frequency, filters for CS/ML field, logs top 5 most-referenced works,
-    and returns (chased_papers, ref_counter, ref_citers, top_15_citers).
+    and returns (chased_papers, ref_counter, ref_citers).
     """
     sorted_cands = sorted(candidates, key=lambda p: getattr(p, "citationCount", 0) or 0, reverse=True)
     top_15 = sorted_cands[:15]
     if not top_15:
-        return [], Counter(), {}, []
+        return [], Counter(), {}
 
     from .paper_retrieval import _extract_s2_batch_id, _s2_limiter, S2_BATCH_API
     batch_ids: list[str] = []
@@ -239,7 +239,7 @@ async def citation_chasing(
             id_to_cand[bid] = p
 
     if not batch_ids:
-        return [], Counter(), {}, []
+        return [], Counter(), {}
 
     headers = {"User-Agent": "ResearchLens/2.0 (academic research tool)"}
     if getattr(settings, "SEMANTIC_SCHOLAR_API_KEY", "") and settings.SEMANTIC_SCHOLAR_API_KEY.strip():
@@ -253,7 +253,7 @@ async def citation_chasing(
         try:
             async with httpx.AsyncClient(timeout=25.0) as client:
                 params = {
-                    "fields": "references.paperId,references.title,references.citationCount,references.year,references.externalIds,references.abstract,references.fieldsOfStudy,references.authors,references.openAccessPdf"
+                    "fields": "references.paperId,references.title,references.citationCount,references.year,references.externalIds,references.abstract,references.fieldsOfStudy,references.authors"
                 }
                 resp = await client.post(
                     S2_BATCH_API,
@@ -306,7 +306,7 @@ async def citation_chasing(
                     logger.warning("[CitationChasing] S2 batch returned HTTP %d", resp.status_code)
         except Exception as exc:
             logger.warning("[CitationChasing] S2 batch failed: %s", exc)
-            return [], Counter(), {}, []
+            return [], Counter(), {}
 
     # Log the top 5 most-referenced works found
     top_5 = ref_counter.most_common(5)
@@ -334,9 +334,7 @@ async def citation_chasing(
         if not authors_list:
             authors_list = ["Unknown"]
 
-        oa_pdf = r.get("openAccessPdf") or {}
-        oa_url = oa_pdf.get("url") if isinstance(oa_pdf, dict) else None
-        pdf_url = f"https://arxiv.org/pdf/{clean_arxiv}" if clean_arxiv else (oa_url or None)
+        pdf_url = f"https://arxiv.org/pdf/{clean_arxiv}" if clean_arxiv else None
 
         paper = Paper(
             id=pid,
@@ -354,7 +352,7 @@ async def citation_chasing(
         setattr(paper, "_citers", ref_citers.get(k, []))
         chased_papers.append(paper)
 
-    return chased_papers, ref_counter, ref_citers, top_15
+    return chased_papers, ref_counter, ref_citers
 
 
 async def select_anchor_paper(
@@ -364,57 +362,22 @@ async def select_anchor_paper(
 ) -> tuple[Optional[Paper], list[Paper], dict[str, Any]]:
     """
     Selects the foundational anchor paper for factual-lookup questions:
-    1. Exact title in question (B.1): Contiguous substring >= 4 words or normalized equality.
-    2. Exact title-guess matching: Highest-cited candidate meeting ANCHOR_MIN_CITATIONS.
-    3. Anchor scoring (B.2-B.6):
-       - Candidates = key-term matches UNION citation-chasing works.
-       - Key-term-restricted reference counting (B.2): ref_share among key-phrase citers.
-       - Generality penalty (lift) (B.3): lift = ref_share / share_other; score *= min(lift, 3).
-       - Topical gate (B.4): embedding similarity >= TOPICAL_MIN (0.35) or ref_share >= 0.6.
-       - Anchor confidence (B.5): margin < 10% or weak topical gate -> anchor_confidence='uncertain'.
-       - Config-driven weights and thresholds logged per run (B.6).
+    1. Exact title-guess matching (first priority when it exists and meets ANCHOR_MIN_CITATIONS).
+    2. Anchor scoring:
+       candidates = key-term matches UNION works found by citation chasing.
+       score = 0.5 * normalized reference frequency + 0.3 * normalized log(citationCount) + 0.2 * earliness.
+       The key term need NOT appear in anchor's own title/abstract; require it in titles/abstracts of citing papers.
+       Prefer longest matching phrase; down-weight terms found in > 40% candidate titles.
+       Compare words by stem or 5-character prefix ('nets' matches 'networks').
+       Require citationCount >= ANCHOR_MIN_CITATIONS or reference frequency >= 3, else anchor = None.
+       Logs rule, scores, and runner-up.
     """
     min_citations = getattr(settings, "ANCHOR_MIN_CITATIONS", 1000)
-    w_ref = getattr(settings, "ANCHOR_WEIGHT_REF", 0.5)
-    w_cites = getattr(settings, "ANCHOR_WEIGHT_CITES", 0.3)
-    w_earl = getattr(settings, "ANCHOR_WEIGHT_EARLINESS", 0.2)
-    topical_min = getattr(settings, "ANCHOR_TOPICAL_MIN", 0.35)
-    margin_thresh = getattr(settings, "ANCHOR_MARGIN_THRESHOLD", 0.10)
-
-    logger.info(
-        "[AnchorConfig] weights: ref=%.2f, cites=%.2f, earliness=%.2f, topical_min=%.2f, margin_thresh=%.2f, min_cites=%d",
-        w_ref, w_cites, w_earl, topical_min, margin_thresh, min_citations
-    )
 
     def get_cites(p: Paper) -> int:
         return getattr(p, "citationCount", 0) or 0
 
-    # 1. Exact title first (B.1): If question text contains a candidate paper title
-    # (normalized equality or contiguous substring >= 4 words)
-    if question:
-        norm_q = normalize_paper_title(question)
-        for p in papers:
-            norm_t = normalize_paper_title(p.title)
-            t_words = norm_t.split()
-            if not norm_t:
-                continue
-            is_exact = (norm_t == norm_q)
-            is_substring = (len(t_words) >= 4 and f" {norm_t} " in f" {norm_q} ")
-            if (is_exact or is_substring) and get_cites(p) >= min_citations:
-                logger.info(
-                    "[Anchor] Rule 'exact_title_in_question' selected anchor: '%s' (cites=%d >= %d)",
-                    p.title, get_cites(p), min_citations
-                )
-                return p, papers, {
-                    "anchor_paper_id": p.id,
-                    "anchor_paper_title": p.title,
-                    "anchor_citations": get_cites(p),
-                    "anchor_rule": "exact_title_in_question",
-                    "anchor_confidence": "high",
-                    "confidence_note": "",
-                }
-
-    # 2. Next priority: Exact title-guess matching if provided and valid
+    # 1. First priority: Exact title-guess matching if provided and valid
     valid_guesses = validate_title_guesses(title_guesses) if title_guesses else []
     if valid_guesses:
         norm_guesses = [normalize_paper_title(g) for g in valid_guesses if normalize_paper_title(g)]
@@ -426,24 +389,18 @@ async def select_anchor_paper(
         if exact_matches:
             exact_matches.sort(key=lambda p: (get_cites(p), 1 if p.pdfUrl else 0), reverse=True)
             best_anchor = exact_matches[0]
-            logger.info(
-                "[Anchor] Rule 'exact_title_guess' selected anchor: '%s' (cites=%d >= %d)",
-                best_anchor.title, get_cites(best_anchor), min_citations
-            )
+            logger.info("[Anchor] Rule 'exact_title_guess' selected anchor: '%s' (cites=%d >= %d)", best_anchor.title, get_cites(best_anchor), min_citations)
             return best_anchor, papers, {
                 "anchor_paper_id": best_anchor.id,
                 "anchor_paper_title": best_anchor.title,
                 "anchor_citations": get_cites(best_anchor),
                 "anchor_rule": "exact_title_guess",
-                "anchor_confidence": "high",
-                "confidence_note": "",
             }
 
     # Extract key terms, prefer longest matching phrase
     raw_terms = extract_key_terms(question) if question else []
     key_terms = sorted(list(dict.fromkeys(raw_terms)), key=len, reverse=True)
     logger.info("[Anchor] Extracted key terms (longest first): %s", key_terms)
-    primary_key_term = key_terms[0] if key_terms else ""
 
     # Down-weight terms found in more than 40% of candidate titles
     n_candidates = max(len(papers), 1)
@@ -454,29 +411,13 @@ async def select_anchor_paper(
         term_weights[kt] = 0.2 if ratio > 0.40 else 1.0
 
     # Run citation chasing to populate reference frequencies and chased papers
-    chased_papers, ref_counter, ref_citers, top_citers = await citation_chasing(papers, key_terms)
+    chased_papers, ref_counter, ref_citers = await citation_chasing(papers, key_terms)
     if chased_papers:
         existing_ids = {p.id for p in papers}
         for cp in chased_papers:
             if cp.id not in existing_ids:
                 papers.append(cp)
                 existing_ids.add(cp.id)
-
-    # B.2: Key-term-restricted reference counting
-    key_phrase_citers = [cp for cp in top_citers if any(_text_matches_key_term(cp.title, kt) for kt in key_terms)]
-    other_citers = [cp for cp in top_citers if cp not in key_phrase_citers]
-    n_key = len(key_phrase_citers)
-    n_other = len(other_citers)
-    logger.info("[Anchor] Citing papers split: %d key-phrase citers, %d other citers", n_key, n_other)
-
-    # Encode primary key term for B.4 Topical Gate
-    from .embeddings import embed_texts
-    q_emb = None
-    if primary_key_term or question:
-        try:
-            q_emb = embed_texts([primary_key_term or question])
-        except Exception as exc:
-            logger.warning("[Anchor] Could not compute query embedding for topical gate: %s", exc)
 
     # Candidates = key-term matches UNION works found by citation chasing
     anchor_candidates: list[Paper] = []
@@ -493,9 +434,12 @@ async def select_anchor_paper(
             continue
 
         # Check key-term relevance:
+        # Key term need NOT appear in anchor's own title/abstract;
+        # require it to appear in titles/abstracts of papers that cite it OR its own title/abstract
         is_relevant = False
         cand_weight = 1.0
 
+        # Check citing papers (if chased or in references)
         citers = getattr(p, "_citers", []) or ref_citers.get(p.title.strip().lower(), [])
         if citers:
             for cp in citers:
@@ -508,6 +452,7 @@ async def select_anchor_paper(
                 if is_relevant:
                     break
 
+        # Also check paper's own title/abstract
         if not is_relevant:
             own_text = f"{p.title} {p.abstract or ''}"
             for kt in key_terms:
@@ -516,58 +461,18 @@ async def select_anchor_paper(
                     cand_weight = max(cand_weight, term_weights.get(kt, 1.0))
                     break
 
-        if not is_relevant:
-            continue
-
-        # B.2: Reference SHARE among key-phrase citing papers
-        key_ref_count = sum(1 for cp in key_phrase_citers if cp in citers or any(cp.id == c.id for c in citers))
-        if n_key > 0:
-            ref_share = key_ref_count / n_key
-        else:
-            ref_share = p_ref_count / max(len(top_citers), 1)
-
-        # B.3: Generality penalty (lift)
-        if n_other < 5:
-            lift_factor = 1.0
-        else:
-            other_ref_count = sum(1 for cp in other_citers if cp in citers or any(cp.id == c.id for c in citers))
-            share_other = other_ref_count / n_other
-            lift = ref_share / max(share_other, 0.05)
-            lift_factor = min(lift, 3.0)
-
-        # B.4: Topical gate
-        topical_sim = 1.0
-        if q_emb is not None:
-            try:
-                cand_text = f"{p.title}. {p.abstract or ''}"[:400]
-                cand_emb = embed_texts([cand_text])
-                topical_sim = float(np.dot(q_emb[0], cand_emb[0]))
-            except Exception as exc:
-                logger.debug("[Anchor] Error embedding candidate '%s': %s", p.title[:30], exc)
-
-        if topical_sim < topical_min and ref_share < 0.6:
-            logger.info(
-                "[Anchor] Candidate '%s' failed topical gate (sim=%.3f < %.2f and ref_share=%.2f < 0.60)",
-                p.title[:45], topical_sim, topical_min, ref_share
-            )
-            continue
-
-        setattr(p, "_ref_share", ref_share)
-        setattr(p, "_lift_factor", lift_factor)
-        setattr(p, "_topical_sim", topical_sim)
-        setattr(p, "_cand_term_weight", cand_weight)
-        setattr(p, "_effective_ref_count", p_ref_count)
-        anchor_candidates.append(p)
-        seen_cand_ids.add(p.id)
-
-    if n_other < 5 and top_citers:
-        logger.info("[Anchor] Pool has fewer than 5 non-key-phrase papers (%d); skipping generality lift", n_other)
+        if is_relevant:
+            setattr(p, "_effective_ref_count", p_ref_count)
+            setattr(p, "_term_weight", cand_weight)
+            anchor_candidates.append(p)
+            seen_cand_ids.add(p.id)
 
     if not anchor_candidates:
-        logger.info("[Anchor] Rule 'none': No candidate paper met threshold or passed topical gate (min %d citations or ref_count >= 3)", min_citations)
+        logger.info("[Anchor] Rule 'none': No candidate paper met threshold (min %d citations or ref_count >= 3)", min_citations)
         return None, papers, {"anchor_paper_id": None, "anchor_rule": "none", "reason": "no_anchor_above_threshold"}
 
     # Compute scoring components across anchor_candidates
+    max_ref_count = max([getattr(p, "_effective_ref_count", 0) for p in anchor_candidates] + [1])
     max_cites = max([get_cites(p) for p in anchor_candidates] + [1])
     max_log_cites = math.log(max_cites + 1)
 
@@ -575,9 +480,11 @@ async def select_anchor_paper(
     min_year = min(years) if years else 2014
     max_year = max(years) if years else 2024
 
-    scored_candidates: list[tuple[Paper, float, float, float, float, float, float]] = []
+    scored_candidates: list[tuple[Paper, float, float, float, float, int]] = []
     for p in anchor_candidates:
-        ref_share = getattr(p, "_ref_share", 0.0)
+        rf = getattr(p, "_effective_ref_count", 0)
+        norm_ref = (rf / max_ref_count) if max_ref_count > 0 else 0.0
+
         c = get_cites(p)
         norm_cites = (math.log(c + 1) / max_log_cites) if max_log_cites > 0 else 0.0
 
@@ -585,51 +492,34 @@ async def select_anchor_paper(
         yr_clamped = max(1950, min(2026, yr))
         earliness = ((max_year - yr_clamped + 1) / (max_year - min_year + 1)) if max_year > min_year else 1.0
 
-        # Base formula: w_ref * ref_share + w_cites * norm_cites + w_earl * earliness
-        base_score = w_ref * ref_share + w_cites * norm_cites + w_earl * earliness
-        lift_factor = getattr(p, "_lift_factor", 1.0)
-        t_weight = getattr(p, "_cand_term_weight", 1.0)
-        final_score = base_score * lift_factor * t_weight
+        # Base formula: 0.5 * normalized ref frequency + 0.3 * normalized log(cites) + 0.2 * earliness
+        base_score = 0.5 * norm_ref + 0.3 * norm_cites + 0.2 * earliness
+        t_weight = getattr(p, "_term_weight", 1.0)
+        final_score = base_score * t_weight
 
-        scored_candidates.append((p, final_score, ref_share, norm_cites, earliness, lift_factor, getattr(p, "_topical_sim", 1.0)))
+        scored_candidates.append((p, final_score, norm_ref, norm_cites, earliness, rf))
 
     scored_candidates.sort(key=lambda x: x[1], reverse=True)
-    best_cand, best_score, best_share, best_cites, best_earl, best_lift, best_sim = scored_candidates[0]
+    best_cand, best_score, best_rf, best_cites, best_earl, best_rf_count = scored_candidates[0]
 
-    runner_up_cand: Optional[Paper] = None
-    runner_up_score = 0.0
     runner_up_str = "None"
     if len(scored_candidates) > 1:
-        runner_up_cand, runner_up_score, ru_share, ru_cites, ru_earl, ru_lift, ru_sim = scored_candidates[1]
+        ru_cand, ru_score, ru_rf, ru_cites, ru_earl, ru_rf_count = scored_candidates[1]
         runner_up_str = (
-            f"'{runner_up_cand.title}' (score={runner_up_score:.4f} [share={ru_share:.2f}, cites={ru_cites:.2f} ({get_cites(runner_up_cand)}), earl={ru_earl:.2f}, lift={ru_lift:.2f}], year={runner_up_cand.publicationYear})"
+            f"'{ru_cand.title}' (score={ru_score:.4f} [ref={ru_rf:.2f} ({ru_rf_count}x), cites={ru_cites:.2f} ({get_cites(ru_cand)}), earl={ru_earl:.2f}], year={ru_cand.publicationYear})"
         )
 
-    # B.5: Anchor confidence and margin
-    margin = (best_score - runner_up_score) / best_score if len(scored_candidates) > 1 and best_score > 0 else 1.0
-    topical_weak = (best_sim < 0.40 and best_share < 0.60)
-    if margin < margin_thresh or topical_weak:
-        anchor_confidence = "uncertain"
-        uncertain_label = f"Source paper uncertain: '{best_cand.title}' or '{runner_up_cand.title}'" if runner_up_cand else f"Source paper uncertain: '{best_cand.title}'"
-    else:
-        anchor_confidence = "high"
-        uncertain_label = ""
-
     logger.info(
-        "[Anchor] Rule 'anchor_scoring' selected anchor: '%s' (score=%.4f [share=%.2f, cites=%.2f (%d), earl=%.2f, lift=%.2f], confidence=%s)",
-        best_cand.title, best_score, best_share, best_cites, get_cites(best_cand), best_earl, best_lift, anchor_confidence
+        "[Anchor] Rule 'anchor_scoring' selected anchor: '%s' (score=%.4f [ref=%.2f (%dx), cites=%.2f (%d), earl=%.2f], year=%s)",
+        best_cand.title, best_score, best_rf, best_rf_count, best_cites, get_cites(best_cand), best_earl, best_cand.publicationYear
     )
     logger.info("[Anchor] Runner-up: %s", runner_up_str)
-    if uncertain_label:
-        logger.warning("[Anchor] %s (margin=%.2f%% < %.0f%%)", uncertain_label, margin * 100, margin_thresh * 100)
 
     return best_cand, papers, {
         "anchor_paper_id": best_cand.id,
         "anchor_paper_title": best_cand.title,
         "anchor_citations": get_cites(best_cand),
         "anchor_rule": "anchor_scoring",
-        "anchor_confidence": anchor_confidence,
-        "confidence_note": uncertain_label,
         "score": best_score,
         "runner_up": runner_up_str,
     }
