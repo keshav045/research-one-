@@ -40,9 +40,22 @@ if _backend_env.exists():
 else:
     load_dotenv(Path(__file__).parent / ".env.example")
 
-from .config import settings
-from .models.database import create_tables
-from .routers.research import router as research_router, direct_router
+import sys
+_backend_dir = Path(__file__).resolve().parent
+_root_dir = _backend_dir.parent
+if str(_root_dir) not in sys.path:
+    sys.path.insert(0, str(_root_dir))
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
+
+try:
+    from .config import settings
+    from .models.database import create_tables
+    from .routers.research import router as research_router, direct_router
+except (ImportError, ValueError):
+    from backend.config import settings
+    from backend.models.database import create_tables
+    from backend.routers.research import router as research_router, direct_router
 
 
 # ── Lifespan (startup / shutdown) ─────────────────────────────────────────────
@@ -118,16 +131,25 @@ app = FastAPI(
 )
 
 # ── CORS ───────────────────────────────────────────────────────────────────────
-# Allows the Vite dev server (localhost:517x) to call the API
+# Allows local dev servers, Netlify deploy URLs (*.netlify.app), and custom CORS_ORIGINS
+_cors_origins_env = os.getenv("CORS_ORIGINS", "")
+_allowed_origins = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+]
+if _cors_origins_env:
+    for _origin in _cors_origins_env.split(","):
+        _cleaned = _origin.strip()
+        if _cleaned and _cleaned not in _allowed_origins:
+            _allowed_origins.append(_cleaned)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://localhost:5175",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:5174",
-    ],
+    allow_origins=_allowed_origins if "*" not in _allowed_origins else ["*"],
+    allow_origin_regex=r"https://.*\.netlify\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,0 +1,38 @@
+# =============================================================================
+# Render Blueprint — ResearchLens Backend Service
+# =============================================================================
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: researchlens-backend
+    env: python
+    region: oregon
+    plan: starter
+    buildCommand: "pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && pip install --no-cache-dir -r backend/requirements.txt"
+    startCommand: "uvicorn backend.main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: HOST
+        value: 0.0.0.0
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash
+      - key: SEMANTIC_SCHOLAR_API_KEY
+        sync: false
+      - key: OPENALEX_API_KEY
+        sync: false
+      - key: OPENALEX_EMAIL
+        value: researchlens.tool@gmail.com
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: NLI_DEVICE
+        value: cpu
+      - key: PDF_CACHE_DIR
+        value: ./pdf_cache
