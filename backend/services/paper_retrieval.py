@@ -846,8 +846,11 @@ async def _fetch_openalex_query(query: str, limit: int = 50) -> list[Paper]:
     }
     if filter_val:
         params["filter"] = filter_val
+    headers = {}
     if getattr(settings, "OPENALEX_API_KEY", "") and settings.OPENALEX_API_KEY.strip():
-        params["api_key"] = settings.OPENALEX_API_KEY.strip()
+        key = settings.OPENALEX_API_KEY.strip()
+        params["api_key"] = key
+        headers["Authorization"] = f"Bearer {key}"
 
     # Exact sanitized URL for diagnosis logging (no email or api key)
     safe_params = [f"search={clean_q}", "sort=cited_by_count:desc", f"per_page={min(limit, 50)}"]
@@ -857,7 +860,7 @@ async def _fetch_openalex_query(query: str, limit: int = 50) -> list[Paper]:
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(OPENALEX_API, params=params)
+            resp = await client.get(OPENALEX_API, params=params, headers=headers)
             logger.info("[OpenAlex] Request URL: '%s' -> HTTP %d", diag_url, resp.status_code)
             if resp.status_code == 200:
                 data = resp.json()
@@ -917,6 +920,10 @@ async def enrich_papers_with_openalex(papers: list[Paper]) -> list[Paper]:
         return papers
 
     email = getattr(settings, "OPENALEX_EMAIL", "researchlens.tool@gmail.com")
+    api_key = getattr(settings, "OPENALEX_API_KEY", "").strip()
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     enriched_count = 0
 
     # Batch query OpenAlex by locations.landing_page_url for arXiv papers
@@ -924,9 +931,12 @@ async def enrich_papers_with_openalex(papers: list[Paper]) -> list[Paper]:
     for i in range(0, len(arxiv_filter_urls), batch_size):
         chunk = arxiv_filter_urls[i : i + batch_size]
         f = "locations.landing_page_url:" + "|".join(chunk)
+        params = {"filter": f, "mailto": email, "per_page": 50}
+        if api_key:
+            params["api_key"] = api_key
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(OPENALEX_API, params={"filter": f, "mailto": email, "per_page": 50})
+                resp = await client.get(OPENALEX_API, params=params, headers=headers)
                 if resp.status_code == 200:
                     for w in resp.json().get("results", []):
                         c_count = w.get("cited_by_count") or 0
@@ -974,9 +984,12 @@ async def enrich_papers_with_openalex(papers: list[Paper]) -> list[Paper]:
     for i in range(0, len(doi_filter_urls), batch_size):
         chunk = doi_filter_urls[i : i + batch_size]
         f = "doi:" + "|".join(chunk)
+        params = {"filter": f, "mailto": email, "per_page": 50}
+        if api_key:
+            params["api_key"] = api_key
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(OPENALEX_API, params={"filter": f, "mailto": email, "per_page": 50})
+                resp = await client.get(OPENALEX_API, params=params, headers=headers)
                 if resp.status_code == 200:
                     for w in resp.json().get("results", []):
                         c_count = w.get("cited_by_count") or 0

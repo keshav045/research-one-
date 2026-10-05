@@ -311,10 +311,22 @@ async def resolve_paper_pdf_urls(paper: Paper) -> list[str]:
     # Cascade Step 3: Look up through OpenAlex
     if not arxiv_id and paper.title:
         try:
-            norm_target = _normalize_title_for_lookup(paper.title)
+            openalex_key = getattr(settings, "OPENALEX_API_KEY", "").strip()
+            headers = {}
+            if openalex_key:
+                headers["Authorization"] = f"Bearer {openalex_key}"
+            oa_params = {
+                "search": paper.title,
+                "per_page": 5,
+                "mailto": getattr(settings, "OPENALEX_EMAIL", "researchlens.tool@gmail.com"),
+            }
+            if openalex_key:
+                oa_params["api_key"] = openalex_key
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(
-                    f"https://api.openalex.org/works?search={paper.title}&per_page=5&mailto=researchlens.tool@gmail.com"
+                    "https://api.openalex.org/works",
+                    params=oa_params,
+                    headers=headers,
                 )
                 if resp.status_code == 200:
                     results = resp.json().get("results", [])
