@@ -42,7 +42,7 @@ else:
 
 from .config import settings
 from .models.database import create_tables
-from .routers.research import router as research_router
+from .routers.research import router as research_router, direct_router
 
 
 # ── Lifespan (startup / shutdown) ─────────────────────────────────────────────
@@ -135,6 +135,7 @@ app.add_middleware(
 
 # ── Routers ────────────────────────────────────────────────────────────────────
 app.include_router(research_router)
+app.include_router(direct_router)
 
 
 # ── Health check ───────────────────────────────────────────────────────────────

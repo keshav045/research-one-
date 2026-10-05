@@ -652,6 +652,32 @@ def job_to_investigation(job: ResearchJob) -> ResearchInvestigation:
     stage_stats_data = job.get_stage_stats()
     stage_stats = [StageStat(**s) for s in stage_stats_data]
 
+    debug_blob = job.get_debug()
+    raw_cite_integrity = debug_blob.get("citation_integrity", (job.citation_coverage / 100.0 if job.citation_coverage else 0.0))
+    cite_integrity_float = raw_cite_integrity / 100.0 if raw_cite_integrity > 1.0 else raw_cite_integrity
+
+    total_claims = job.verified_claims + job.partially_supported_claims + job.unsupported_claims + job.contradicted_claims
+    ev_coverage = round((job.verified_claims / total_claims * 100.0), 1) if total_claims > 0 else 0.0
+
+    # Overall Research Confidence metric (Requirement 23)
+    if (
+        job.status == "insufficient_evidence"
+        or job.verified_claims == 0
+        or cite_integrity_float < 0.60
+        or (total_claims > 0 and job.contradicted_claims / total_claims >= 0.3)
+    ):
+        conf = "LOW"
+    elif (
+        job.verified_claims >= 4
+        and cite_integrity_float >= 0.85
+        and job.papers_analyzed >= 3
+        and job.contradicted_claims == 0
+        and not debug_blob.get("retrieval_errors")
+    ):
+        conf = "HIGH"
+    else:
+        conf = "MEDIUM"
+
     return ResearchInvestigation(
         id=job.id,
         question=job.question,
@@ -667,12 +693,15 @@ def job_to_investigation(job: ResearchJob) -> ResearchInvestigation:
         contradictedClaims=job.contradicted_claims,
         potentialConflicts=job.potential_conflicts,
         citationCoverage=job.citation_coverage,
+        citation_integrity=round(cite_integrity_float * 100.0, 1),
+        evidence_coverage=ev_coverage,
+        research_confidence=conf,
         uncitedSentences=job.uncited_sentences,
         passages_total=job.passages_total,
         failure_reason=job.failure_reason,
         anchor_paper_id=job.anchor_paper_id,
         stage_stats=stage_stats,
-        debug=job.get_debug(),
+        debug=debug_blob,
         createdAt=job.created_at.isoformat() if job.created_at else "",
         updatedAt=job.updated_at.isoformat() if job.updated_at else "",
         pipeline=pipeline,

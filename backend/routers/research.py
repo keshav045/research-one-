@@ -127,6 +127,10 @@ async def get_job_papers(
     job_id: str,
     db: Session = Depends(get_db),
 ) -> list[Paper]:
+    job = db.query(ResearchJob).filter(ResearchJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Research job '{job_id}' not found")
+
     records = db.query(PaperRecord).filter(PaperRecord.job_id == job_id).all()
     papers: list[Paper] = []
     for r in records:
@@ -151,6 +155,103 @@ async def get_job_papers(
             )
         )
     return papers
+
+
+# ─── Evidence for a Job ───────────────────────────────────────────────────────
+
+
+@router.get("/{job_id}/evidence")
+async def get_job_evidence(
+    job_id: str,
+    db: Session = Depends(get_db),
+) -> dict:
+    job = db.query(ResearchJob).filter(ResearchJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Research job '{job_id}' not found")
+
+    report_data = job.get_report()
+    citations = []
+    if report_data and "findings" in report_data:
+        for sec in report_data.get("findings", []):
+            for para in sec.get("paragraphs", []):
+                for cite in para.get("citations", []):
+                    citations.append(cite)
+
+    records = db.query(PaperRecord).filter(PaperRecord.job_id == job_id).all()
+    passages = []
+    for r in records:
+        for p in r.get_passages():
+            passages.append({
+                "paper_id": r.id.split("::")[-1],
+                "paper_title": r.title,
+                **p,
+            })
+
+    return {
+        "job_id": job.id,
+        "evidence_items": job.evidence_items,
+        "citations": citations,
+        "passages": passages,
+    }
+
+
+# ─── Claims for a Job ─────────────────────────────────────────────────────────
+
+
+@router.get("/{job_id}/claims")
+async def get_job_claims(
+    job_id: str,
+    db: Session = Depends(get_db),
+) -> dict:
+    job = db.query(ResearchJob).filter(ResearchJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Research job '{job_id}' not found")
+
+    report_data = job.get_report()
+    claims = []
+    if report_data and "findings" in report_data:
+        for sec in report_data.get("findings", []):
+            for para in sec.get("paragraphs", []):
+                for cite in para.get("citations", []):
+                    claims.append({
+                        "badge_number": cite.get("badgeNumber"),
+                        "claim": cite.get("claim"),
+                        "status": cite.get("status"),
+                        "paper_id": cite.get("paperId"),
+                        "paper_title": cite.get("paperTitle"),
+                        "page": cite.get("page"),
+                        "passage": cite.get("passage"),
+                    })
+
+    debug_blob = job.get_debug()
+    return {
+        "job_id": job.id,
+        "total_claims": len(claims),
+        "verified_claims": job.verified_claims,
+        "partially_supported_claims": job.partially_supported_claims,
+        "unsupported_claims": job.unsupported_claims,
+        "contradicted_claims": job.contradicted_claims,
+        "claims": claims,
+        "rejected_claims": debug_blob.get("rejected_claims", []),
+    }
+
+
+# ─── Report for a Job ─────────────────────────────────────────────────────────
+
+
+@router.get("/{job_id}/report")
+async def get_job_report(
+    job_id: str,
+    db: Session = Depends(get_db),
+) -> dict:
+    job = db.query(ResearchJob).filter(ResearchJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Research job '{job_id}' not found")
+
+    report_data = job.get_report()
+    if not report_data:
+        raise HTTPException(status_code=404, detail=f"Report not yet available for job '{job_id}' (status: {job.status})")
+    return report_data
 
 
 # ─── Debug Diagnostics for a Job ──────────────────────────────────────────────
@@ -192,4 +293,18 @@ async def get_job_debug(
         # Full raw debug blob for advanced diagnostics
         "debug": debug_blob,
     }
+
+
+# ─── Direct Compatibility Router (/research) ──────────────────────────────────
+
+direct_router = APIRouter(prefix="/research", tags=["research-direct"])
+direct_router.add_api_route("", start_research, methods=["POST"], response_model=ResearchInvestigation, status_code=status.HTTP_202_ACCEPTED)
+direct_router.add_api_route("/{job_id}", get_research, methods=["GET"], response_model=ResearchInvestigation)
+direct_router.add_api_route("", list_research, methods=["GET"], response_model=list[ResearchInvestigation])
+direct_router.add_api_route("/{job_id}", delete_research, methods=["DELETE"])
+direct_router.add_api_route("/{job_id}/papers", get_job_papers, methods=["GET"], response_model=list[Paper])
+direct_router.add_api_route("/{job_id}/evidence", get_job_evidence, methods=["GET"])
+direct_router.add_api_route("/{job_id}/claims", get_job_claims, methods=["GET"])
+direct_router.add_api_route("/{job_id}/report", get_job_report, methods=["GET"])
+direct_router.add_api_route("/{job_id}/debug", get_job_debug, methods=["GET"])
 

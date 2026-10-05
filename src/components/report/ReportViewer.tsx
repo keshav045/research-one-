@@ -96,6 +96,15 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
             }`}>
               {isInsufficient ? 'Insufficient Evidence' : (investigation.status === 'completed_with_warnings' ? 'Completed with Warnings' : 'Synthesis Report')}
             </span>
+            {investigation.research_confidence && (
+              <span className={`px-2 py-0.5 rounded border text-[11px] font-mono font-semibold uppercase ${
+                investigation.research_confidence === 'HIGH' ? 'border-emerald-300 bg-emerald-50 text-emerald-700' :
+                investigation.research_confidence === 'MEDIUM' ? 'border-blue-300 bg-blue-50 text-blue-700' :
+                'border-amber-300 bg-amber-50 text-amber-700'
+              }`}>
+                Confidence: {investigation.research_confidence}
+              </span>
+            )}
             <span className="text-gray-300">•</span>
             <span className="text-[11px] text-gray-400 font-mono">{investigation.id}</span>
           </div>

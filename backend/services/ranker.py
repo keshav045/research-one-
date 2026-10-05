@@ -719,12 +719,37 @@ def _extract_doi(paper: Paper) -> Optional[str]:
     return None
 
 
+def _extract_s2_id(paper: Paper) -> Optional[str]:
+    """Extract clean Semantic Scholar ID."""
+    if getattr(paper, "semantic_scholar_id", None):
+        return str(paper.semantic_scholar_id).strip()
+    if paper.id.startswith("s2-"):
+        return paper.id[len("s2-"):].strip()
+    return None
+
+
+def _extract_openalex_id(paper: Paper) -> Optional[str]:
+    """Extract clean OpenAlex ID (e.g. W123456789)."""
+    if getattr(paper, "openalex_id", None):
+        return str(paper.openalex_id).strip()
+    if paper.id.startswith("openalex-"):
+        return paper.id[len("openalex-"):].strip()
+    if "openalex.org/W" in paper.id:
+        return "W" + paper.id.split("openalex.org/W")[-1].strip()
+    return None
+
+
 def filter_and_deduplicate(papers: list[Paper]) -> list[Paper]:
     """
-    Deduplicates candidate papers:
-    - Checks in priority order: arXiv ID, DOI, then normalized title.
+    Deduplicates candidate papers deterministically:
+    - Priority order:
+      1. DOI
+      2. arXiv ID
+      3. Semantic Scholar ID
+      4. OpenAlex ID
+      5. Normalized Title + publication year
     - When duplicate records of the same paper are found, merges them:
-      keeps the highest citationCount, merges pdfUrl, abstract, venue, and authors.
+      keeps the highest citationCount, merges pdfUrl, abstract, venue, authors, and external IDs.
     - Drops papers with:
       - 'withdrawn' in title
       - empty abstract (< 20 chars)
@@ -750,16 +775,22 @@ def filter_and_deduplicate(papers: list[Paper]) -> list[Paper]:
             logger.info("[Ranker] Dropping future year paper (%d): %s", p.publicationYear, p.title[:60])
             continue
 
-        # Canonical deduplication keys in priority order: arXiv ID, DOI, title
-        aid = _extract_arxiv_id(p)
+        # Canonical deduplication keys in priority order: DOI, arXiv ID, S2 ID, OpenAlex ID, title
         doi = _extract_doi(p)
+        aid = _extract_arxiv_id(p)
+        s2id = _extract_s2_id(p)
+        oaid = _extract_openalex_id(p)
         title_key = _normalize_title(p.title)
 
         existing: Optional[Paper] = None
-        if aid and f"arxiv:{aid}" in key_to_paper:
-            existing = key_to_paper[f"arxiv:{aid}"]
-        elif doi and f"doi:{doi}" in key_to_paper:
+        if doi and f"doi:{doi}" in key_to_paper:
             existing = key_to_paper[f"doi:{doi}"]
+        elif aid and f"arxiv:{aid}" in key_to_paper:
+            existing = key_to_paper[f"arxiv:{aid}"]
+        elif s2id and f"s2:{s2id}" in key_to_paper:
+            existing = key_to_paper[f"s2:{s2id}"]
+        elif oaid and f"openalex:{oaid}" in key_to_paper:
+            existing = key_to_paper[f"openalex:{oaid}"]
         elif f"title:{title_key}" in key_to_paper:
             existing = key_to_paper[f"title:{title_key}"]
 
@@ -779,27 +810,44 @@ def filter_and_deduplicate(papers: list[Paper]) -> list[Paper]:
             # 4. DOI
             if not existing.doi and p.doi:
                 existing.doi = p.doi
-            # 5. Venue (prefer specific venue over generic "arXiv" or "Semantic Scholar" or "OpenAlex")
+            # 5. External IDs
+            if aid and not getattr(existing, "arxiv_id", None):
+                existing.arxiv_id = aid
+            if s2id and not getattr(existing, "semantic_scholar_id", None):
+                existing.semantic_scholar_id = s2id
+            if oaid and not getattr(existing, "openalex_id", None):
+                existing.openalex_id = oaid
+            # 6. Venue (prefer specific venue over generic "arXiv" or "Semantic Scholar" or "OpenAlex")
             if p.journalConference and p.journalConference not in ("arXiv", "Semantic Scholar", "OpenAlex", "unknown", ""):
                 if existing.journalConference in ("arXiv", "Semantic Scholar", "OpenAlex", "unknown", ""):
                     existing.journalConference = p.journalConference
-            # 6. Authors
+            # 7. Authors
             if (not existing.authors or existing.authors == ["Unknown"]) and (p.authors and p.authors != ["Unknown"]):
+                existing.authors = p.authors
+            elif p.authors and len(p.authors) > len(existing.authors):
                 existing.authors = p.authors
 
             # Map all keys of this paper to the canonical record
-            if aid:
-                key_to_paper[f"arxiv:{aid}"] = existing
             if doi:
                 key_to_paper[f"doi:{doi}"] = existing
+            if aid:
+                key_to_paper[f"arxiv:{aid}"] = existing
+            if s2id:
+                key_to_paper[f"s2:{s2id}"] = existing
+            if oaid:
+                key_to_paper[f"openalex:{oaid}"] = existing
             key_to_paper[f"title:{title_key}"] = existing
             continue
 
         # New canonical paper
-        if aid:
-            key_to_paper[f"arxiv:{aid}"] = p
         if doi:
             key_to_paper[f"doi:{doi}"] = p
+        if aid:
+            key_to_paper[f"arxiv:{aid}"] = p
+        if s2id:
+            key_to_paper[f"s2:{s2id}"] = p
+        if oaid:
+            key_to_paper[f"openalex:{oaid}"] = p
         key_to_paper[f"title:{title_key}"] = p
         cleaned.append(p)
 
@@ -902,11 +950,23 @@ def rank_papers(
         else:
             final_score = 0.60 * sem_score + 0.25 * cite_score + 0.15 * title_match_bonus
 
+        # Store transparent relevance scoring and reasons on paper
+        p.relevance_score = round(final_score, 4)
+        reasons = [
+            f"semantic: {sem_score:.3f}",
+            f"citations: {cite_score:.3f} ({cites})",
+        ]
+        if title_match_bonus > 0:
+            reasons.append(f"title_match: {title_match_bonus:.2f}")
+        p.relevance_reasons = reasons
+
         scored_papers.append((final_score, p))
 
     # Sort descending by score
     scored_papers.sort(key=lambda x: x[0], reverse=True)
     ranked_pool = [p for _, p in scored_papers]
+
+    min_relevance = getattr(settings, "MIN_PAPER_RELEVANCE", 0.40)
 
     # Selection cut for factual_lookup:
     # 1. The anchor must ALWAYS be in the final ranked set (placed at position 0).
@@ -952,9 +1012,15 @@ def rank_papers(
 
         ranked = final_ranked
     else:
-        ranked = ranked_pool[:target_count]
+        # Filter papers below minimum relevance threshold
+        relevant_pool = [p for p in ranked_pool if getattr(p, "relevance_score", 0.0) >= min_relevance]
+        ranked = relevant_pool[:target_count]
 
-    logger.info("[Ranker] Top paper: '%s' (cites=%d)", ranked[0].title, getattr(ranked[0], "citationCount", 0) or 0)
+    if not ranked:
+        logger.info("[Ranker] No candidate papers met the minimum relevance threshold (%.2f).", min_relevance)
+        return []
+
+    logger.info("[Ranker] Top paper: '%s' (relevance=%.2f, cites=%d)", ranked[0].title, getattr(ranked[0], "relevance_score", 0.0), getattr(ranked[0], "citationCount", 0) or 0)
 
     # Re-assign sequential IDs: paper-1, paper-2, ...
     for idx, p in enumerate(ranked, start=1):

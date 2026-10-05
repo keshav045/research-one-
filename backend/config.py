@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     # Local LLM (HuggingFace — no API key required, heavy download)
     LOCAL_LLM_MODEL: str = "Qwen/Qwen2.5-0.5B-Instruct"
     LOCAL_LLM_MAX_TOKENS: int = 1536
-    LLM_FALLBACK_LOCAL: bool = False
+    LLM_FALLBACK_LOCAL: bool = True
 
     # Qwen (Alibaba DashScope — OpenAI-compatible)
     QWEN_API_KEY: str = ""
@@ -43,6 +43,16 @@ class Settings(BaseSettings):
 
     # Domain / Field of Study Filters
     DEFAULT_FIELDS_OF_STUDY: str = "Computer Science"
+
+    # Source Configuration
+    ARXIV_ENABLED: bool = True
+    SEMANTIC_SCHOLAR_ENABLED: bool = True
+    OPENALEX_ENABLED: bool = True
+    CROSSREF_ENABLED: bool = False
+    CORE_ENABLED: bool = False
+
+    # Relevance Thresholds
+    MIN_PAPER_RELEVANCE: float = 0.40
 
     # Feature Flags
     SEED_PAPERS_ENABLED: bool = True

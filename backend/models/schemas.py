@@ -137,6 +137,27 @@ class Paper(BaseModel):
     fullText: Optional[str] = None
     is_anchor: bool = False
     is_abstract_only: bool = False
+    internal_id: Optional[str] = None
+    source_id: Optional[str] = None
+    arxiv_id: Optional[str] = None
+    semantic_scholar_id: Optional[str] = None
+    openalex_id: Optional[str] = None
+    paper_url: Optional[str] = None
+    venue: Optional[str] = None
+    is_open_access: bool = False
+    publication_type: str = "article"
+    pdf_status: str = "PENDING"
+    evidence_status: str = "PENDING"
+    relevance_score: float = 0.0
+    relevance_reasons: list[str] = Field(default_factory=list)
+
+    @property
+    def year(self) -> int:
+        return self.publicationYear
+
+    @property
+    def citation_count(self) -> int:
+        return self.citationCount
 
 
 # ─── Citation & NLI ───────────────────────────────────────────────────────────
@@ -229,6 +250,9 @@ class ResearchInvestigation(BaseModel):
     contradictedClaims: int = 0
     potentialConflicts: int = 0
     citationCoverage: float = 0.0
+    citation_integrity: float = 0.0
+    evidence_coverage: float = 0.0
+    research_confidence: str = "MEDIUM"
     uncitedSentences: int = 0
     passages_total: int = 0
     failure_reason: Optional[str] = None

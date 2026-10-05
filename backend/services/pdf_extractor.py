@@ -85,15 +85,13 @@ async def _download_pdf(url: str) -> Optional[bytes]:
                     await asyncio.sleep(wait_sec)
                     continue
 
-                resp.raise_for_status()
-
                 content = resp.content
                 if len(content) > MAX_PDF_SIZE_BYTES:
                     logger.warning("[PDF] Exceeds size limit (%d bytes > %d limit): %s", len(content), MAX_PDF_SIZE_BYTES, url)
                     return None
 
-                if "pdf" not in resp.headers.get("content-type", "") and not content.startswith(b"%PDF"):
-                    logger.warning("[PDF] Response is not valid PDF for %s", url)
+                if len(content) < 100 or not content.startswith(b"%PDF"):
+                    logger.warning("[PDF] Response is not valid PDF (missing %%PDF header or < 100 bytes) for %s", url)
                     return None
 
                 cached.write_bytes(content)
@@ -412,6 +410,8 @@ async def extract_paper_passages(paper: Paper) -> list[PaperPassage]:
                     paper.passages_json = json.dumps([p.model_dump() for p in passages])
                     paper.pdfUrl = url
                     paper.is_abstract_only = False
+                    paper.pdf_status = "AVAILABLE"
+                    paper.evidence_status = "AVAILABLE"
                     logger.info("[PDF] Extracted %d passages from '%s' via %s", len(passages), paper.title[:50], url)
                     return passages
                 else:
@@ -427,6 +427,8 @@ async def extract_paper_passages(paper: Paper) -> list[PaperPassage]:
     paper.passages = passages
     paper.passages_json = json.dumps([p.model_dump() for p in passages])
     paper.is_abstract_only = True
+    paper.pdf_status = "FAILED"
+    paper.evidence_status = "ABSTRACT_ONLY"
     is_anchor = getattr(paper, "is_anchor", False)
     if is_anchor:
         logger.warning(

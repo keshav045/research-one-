@@ -79,17 +79,49 @@ class VectorStore:
             logger.warning("[FAISS] faiss indexing unavailable (%s) - falling back to numpy cosine similarity", exc)
             self._index = None
 
-    def search(
+    def search_paper(
         self,
+        paper_id: str,
         query: str,
         top_k: int = 5,
     ) -> list[tuple[PassageRecord, float]]:
         """
-        Semantic search: returns the top-k passages most similar to `query`.
-
-        Returns:
-            List of (PassageRecord, similarity_score) sorted desc by score.
+        Paper-scoped semantic search (Phase 4):
+        FIRST restricts corpus strictly to Paper X, then searches within that subset.
+        Avoids global search and post-filtering where Paper X might be excluded from global top-k.
         """
+        if not self.records:
+            return []
+
+        paper_indices = [i for i, r in enumerate(self.records) if r.paper_id == paper_id]
+        if not paper_indices:
+            logger.info("[FAISS] No passages found for paper_id '%s'", paper_id)
+            return []
+
+        q_vec = embed_query(query)  # (1, D)
+        q_flat = q_vec.squeeze()
+
+        if hasattr(self, "_embeddings") and self._embeddings is not None:
+            paper_embs = self._embeddings[paper_indices]
+            sims = np.dot(paper_embs, q_flat)
+            ranked_local = np.argsort(sims)[::-1][:min(top_k, len(paper_indices))]
+            return [(self.records[paper_indices[idx]], float(sims[idx])) for idx in ranked_local]
+
+        return []
+
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        paper_id: Optional[str] = None,
+    ) -> list[tuple[PassageRecord, float]]:
+        """
+        Semantic search: returns the top-k passages most similar to `query`.
+        If `paper_id` is provided, strictly restricts retrieval to Paper X first.
+        """
+        if paper_id:
+            return self.search_paper(paper_id, query, top_k=top_k)
+
         if not self.records:
             logger.warning("[FAISS] VectorStore records empty")
             return []
@@ -121,11 +153,11 @@ class VectorStore:
     ) -> Optional[tuple[PassageRecord, float]]:
         """
         Finds the single best passage supporting a claim.
-        If `paper_id` is given, restricts results to that paper.
+        If `paper_id` is given, strictly scopes retrieval to Paper X first.
         """
-        candidates = self.search(claim, top_k=top_k * 3)
-
         if paper_id:
-            candidates = [(r, s) for r, s in candidates if r.paper_id == paper_id]
+            candidates = self.search_paper(paper_id, claim, top_k=top_k)
+        else:
+            candidates = self.search(claim, top_k=top_k)
 
         return candidates[0] if candidates else None

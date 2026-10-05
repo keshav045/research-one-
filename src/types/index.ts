@@ -175,6 +175,9 @@ export interface ResearchInvestigation {
   contradictedClaims: number;
   potentialConflicts: number;
   citationCoverage: number; // e.g. 94 (Citation Integrity %)
+  citation_integrity?: number;
+  evidence_coverage?: number;
+  research_confidence?: 'HIGH' | 'MEDIUM' | 'LOW';
   uncitedSentences?: number;
   passages_total?: number;
   failure_reason?: string;

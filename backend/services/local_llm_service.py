@@ -107,13 +107,14 @@ async def _call_local(prompt: str, max_tokens: int = 512) -> str:
 
 
 _ollama_first_call = True
+_ollama_available: Optional[bool] = None
 
 
 async def _call_ollama(prompt: str, max_tokens: int = 512) -> str:
-    """Call Ollama REST API for LLM text generation."""
-    global _ollama_first_call
-    timeout = 180.0 if _ollama_first_call else 45.0
-    _ollama_first_call = False
+    """Call Ollama REST API for LLM text generation with fast availability probe."""
+    global _ollama_first_call, _ollama_available
+    if _ollama_available is False:
+        return ""
 
     url = f"{settings.OLLAMA_URL}/api/generate"
     payload = {
@@ -127,12 +128,28 @@ async def _call_ollama(prompt: str, max_tokens: int = 512) -> str:
         },
     }
     try:
+        # If first call, probe if Ollama server is responsive before long timeout
+        if _ollama_available is None:
+            async with httpx.AsyncClient(timeout=2.0) as probe_client:
+                try:
+                    probe_resp = await probe_client.get(f"{settings.OLLAMA_URL}/api/version")
+                    _ollama_available = (probe_resp.status_code == 200)
+                except Exception:
+                    _ollama_available = False
+                    logger.info("[Ollama] Offline or unreachable; falling back to secondary provider.")
+                    return ""
+
+        timeout = 180.0 if _ollama_first_call else 45.0
+        _ollama_first_call = False
+
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
             return data.get("response", "").strip()
     except Exception as exc:
+        if _ollama_available is None:
+            _ollama_available = False
         logger.warning("[Ollama] Request failed: %s", exc)
         return ""
 
@@ -466,6 +483,23 @@ async def synthesize_report(
 
     references = build_references_from_citations(papers, citations)
     comparison_table = build_comparison_table(papers, citations)
+
+    # Citation Validation (Requirement 21): ensure all [n] badges map to an existing reference
+    ref_count = len(references)
+    def _validate_or_strip_badge(match):
+        badge_num = int(match.group(1))
+        if 1 <= badge_num <= ref_count:
+            return f"[{badge_num}]"
+        logger.warning(
+            "[CitationValidation] Citation [%d] has no reference (only %d references exist). Removing invalid citation.",
+            badge_num,
+            ref_count,
+        )
+        return ""
+
+    verified_answer = re.sub(r"\[(\d+)\]", _validate_or_strip_badge, verified_answer)
+    verified_answer = re.sub(r"\s+([.,;:!?])", r"\1", verified_answer)
+    verified_answer = re.sub(r"\s+", " ", verified_answer).strip()
 
     findings = [
         ReportSection(

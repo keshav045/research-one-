@@ -1035,7 +1035,7 @@ async def retrieve_candidate_papers(
     s2_candidates: list[Paper] = []
 
     # 1. arXiv queries
-    if ResearchSource.ARXIV in sources or "arXiv" in source_values:
+    if (ResearchSource.ARXIV in sources or "arXiv" in source_values) and getattr(settings, "ARXIV_ENABLED", True):
         arxiv_tasks = []
         for title in valid_guesses:
             clean_title = re.sub(r'["\']', '', title).strip()
@@ -1052,7 +1052,7 @@ async def retrieve_candidate_papers(
                     arxiv_candidates.extend(r)
 
     # 2. OpenAlex queries (sorted by cited_by_count:desc, top 50 per query)
-    if ResearchSource.OPENALEX in sources or "OpenAlex" in source_values:
+    if (ResearchSource.OPENALEX in sources or "OpenAlex" in source_values) and getattr(settings, "OPENALEX_ENABLED", True):
         openalex_queries: list[str] = []
         distinctive_term = extract_distinctive_term(question)
         if distinctive_term and distinctive_term not in openalex_queries:
@@ -1072,7 +1072,7 @@ async def retrieve_candidate_papers(
                     openalex_candidates.extend(r)
 
     # 3. Semantic Scholar queries (one at a time, sequential, max 6 if authenticated, 3 if unauthenticated)
-    if ResearchSource.SEMANTIC_SCHOLAR in sources or "Semantic Scholar" in source_values:
+    if (ResearchSource.SEMANTIC_SCHOLAR in sources or "Semantic Scholar" in source_values) and getattr(settings, "SEMANTIC_SCHOLAR_ENABLED", True):
         s2_queries_list: list[str] = []
         for g in valid_guesses:
             if g not in s2_queries_list:
