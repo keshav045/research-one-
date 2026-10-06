@@ -363,6 +363,212 @@ def build_html_report(inv: ResearchInvestigation) -> str:
 </html>"""
 
 
+def build_pdf_report(inv: ResearchInvestigation) -> bytes:
+    """Construct an academic-quality, publication-ready PDF document using PyMuPDF."""
+    try:
+        import fitz
+    except ImportError:
+        logger.error("PyMuPDF (fitz) is not installed; cannot generate PDF.")
+        return b""
+
+    doc = fitz.open()
+    page_w, page_h = 595.3, 841.9  # A4 size
+    margin = 50.0
+    content_w = page_w - 2 * margin
+    content_bottom = page_h - margin
+
+    def add_blank_page():
+        return doc.new_page(width=page_w, height=page_h)
+
+    current_page = add_blank_page()
+    y_cursor = margin
+
+    def check_space(needed_h: float):
+        nonlocal current_page, y_cursor
+        if y_cursor + needed_h > content_bottom - 24:
+            current_page = add_blank_page()
+            y_cursor = margin
+
+    # Header Card on Page 1
+    banner_h = 80.0
+    current_page.draw_rect(
+        fitz.Rect(margin, y_cursor, margin + content_w, y_cursor + banner_h),
+        color=None,
+        fill=(0.06, 0.10, 0.18),  # Deep navy / slate
+    )
+    current_page.insert_text(
+        (margin + 16, y_cursor + 24),
+        "ResearchLens — Autonomous Academic Synthesis",
+        fontsize=13,
+        fontname="helv",
+        color=(1.0, 1.0, 1.0),
+    )
+    q_str = inv.question if len(inv.question) < 85 else inv.question[:82] + "..."
+    current_page.insert_text(
+        (margin + 16, y_cursor + 44),
+        f"Research Question: {q_str}",
+        fontsize=9.0,
+        fontname="helv",
+        color=(0.85, 0.90, 0.98),
+    )
+    created_str = inv.createdAt[:10] if inv.createdAt else datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    meta_line = (
+        f"Date: {created_str}   |   Confidence: {inv.research_confidence}   |   "
+        f"Citation Integrity: {inv.citation_integrity}%   |   Papers Analyzed: {inv.papersAnalyzed}"
+    )
+    current_page.insert_text(
+        (margin + 16, y_cursor + 63),
+        meta_line,
+        fontsize=8.0,
+        fontname="helv",
+        color=(0.60, 0.72, 0.88),
+    )
+    y_cursor += banner_h + 20.0
+
+    if not inv.report:
+        rect = fitz.Rect(margin, y_cursor, margin + content_w, content_bottom)
+        current_page.insert_textbox(rect, f"Status: {inv.status}\n\nNo synthesized report generated.", fontsize=10)
+        return doc.tobytes()
+
+    rep = inv.report
+
+    def render_heading(title: str, level: int = 1):
+        nonlocal current_page, y_cursor
+        check_space(34.0 if level == 1 else 26.0)
+        font_size = 12.5 if level == 1 else 10.5
+        current_page.insert_text(
+            (margin, y_cursor + (13 if level == 1 else 10)),
+            title,
+            fontsize=font_size,
+            fontname="helv",
+            color=(0.06, 0.10, 0.18) if level == 1 else (0.18, 0.24, 0.36),
+        )
+        if level == 1:
+            current_page.draw_line(
+                fitz.Point(margin, y_cursor + 18),
+                fitz.Point(margin + content_w, y_cursor + 18),
+                color=(0.82, 0.86, 0.92),
+                width=0.8,
+            )
+            y_cursor += 28.0
+        else:
+            y_cursor += 20.0
+
+    def render_paragraph(text: str):
+        nonlocal current_page, y_cursor
+        if not text:
+            return
+        words = text.split()
+        para_chunk = ""
+        for word in words:
+            candidate = f"{para_chunk} {word}".strip()
+            rect = fitz.Rect(margin, y_cursor, margin + content_w, content_bottom)
+            unused = current_page.insert_textbox(rect, candidate, fontsize=9.0, fontname="helv")
+            if unused < 0:
+                if para_chunk:
+                    rect_flush = fitz.Rect(margin, y_cursor, margin + content_w, content_bottom)
+                    unused_flush = current_page.insert_textbox(rect_flush, para_chunk, fontsize=9.0, fontname="helv")
+                    y_cursor += max(0, rect_flush.height - unused_flush) + 4.0
+                current_page = add_blank_page()
+                y_cursor = margin
+                para_chunk = word
+            else:
+                para_chunk = candidate
+        if para_chunk:
+            rect = fitz.Rect(margin, y_cursor, margin + content_w, content_bottom)
+            unused = current_page.insert_textbox(rect, para_chunk, fontsize=9.0, fontname="helv")
+            if unused >= 0:
+                y_cursor += max(0, rect.height - unused) + 8.0
+            else:
+                current_page = add_blank_page()
+                y_cursor = margin
+                rect = fitz.Rect(margin, y_cursor, margin + content_w, content_bottom)
+                unused = current_page.insert_textbox(rect, para_chunk, fontsize=9.0, fontname="helv")
+                y_cursor += max(0, rect.height - unused) + 8.0
+
+    # 1. Executive Summary
+    if rep.executiveSummary:
+        render_heading("Executive Summary")
+        render_paragraph(rep.executiveSummary)
+
+    # 2. Methodological Comparison Table
+    if rep.comparisonTable:
+        render_heading("Methodological Comparison")
+        col_widths = [110.0, 110.0, 95.0, 95.0, 77.0]
+        row_h = 18.0
+        headers = ["Model / Approach", "Dataset", "Metric", "Venue / Year", "Citations"]
+        check_space(row_h * (len(rep.comparisonTable) + 2))
+        x = margin
+        for idx, h_text in enumerate(headers):
+            cell_w = col_widths[idx]
+            current_page.draw_rect(fitz.Rect(x, y_cursor, x + cell_w, y_cursor + row_h), color=(0.8, 0.85, 0.9), fill=(0.94, 0.96, 0.98))
+            current_page.insert_text((x + 4, y_cursor + 12), h_text, fontsize=7.5, fontname="helv", color=(0.15, 0.2, 0.3))
+            x += cell_w
+        y_cursor += row_h
+
+        for r_idx, row in enumerate(rep.comparisonTable):
+            check_space(row_h + 4)
+            x = margin
+            perf = row.f1Score if row.f1Score != "Not extracted" else row.mapScore
+            vals = [
+                str(row.model)[:22],
+                str(row.dataset)[:22],
+                str(perf)[:18],
+                f"{row.venue or ''} {row.year or ''}"[:18].strip(),
+                str(row.citationCount or "")[:12],
+            ]
+            bg_col = (1.0, 1.0, 1.0) if r_idx % 2 == 0 else (0.98, 0.98, 0.99)
+            for idx, val_text in enumerate(vals):
+                cell_w = col_widths[idx]
+                current_page.draw_rect(fitz.Rect(x, y_cursor, x + cell_w, y_cursor + row_h), color=(0.85, 0.88, 0.92), fill=bg_col)
+                current_page.insert_text((x + 4, y_cursor + 12), val_text, fontsize=7.5, fontname="helv", color=(0.2, 0.25, 0.35))
+                x += cell_w
+            y_cursor += row_h
+        y_cursor += 12.0
+
+    # 3. Detailed Research Findings
+    if rep.findings:
+        render_heading("Detailed Research Findings")
+        for sec in rep.findings:
+            render_heading(sec.sectionTitle, level=2)
+            for p in sec.paragraphs:
+                cite_str = ""
+                if p.citations:
+                    cite_str = " " + " ".join([f"[{c.badgeNumber}]" for c in p.citations])
+                render_paragraph(p.text + cite_str)
+
+    # 4. Limitations
+    if rep.limitations:
+        render_heading("Limitations & Boundary Conditions")
+        for lim in rep.limitations:
+            render_paragraph(f"• {lim}")
+
+    # 5. Conclusion
+    if rep.conclusion:
+        render_heading("Conclusion")
+        render_paragraph(rep.conclusion)
+
+    # 6. References
+    if rep.references:
+        render_heading("References")
+        for idx, ref in enumerate(rep.references, 1):
+            authors_fmt = ", ".join(ref.authors[:3]) + (" et al." if len(ref.authors) > 3 else "")
+            ref_line = f"[{idx}] {ref.title} ({ref.publicationYear}). {authors_fmt}. {ref.journalConference or ref.source}."
+            if ref.doi:
+                ref_line += f" DOI: {ref.doi}"
+            render_paragraph(ref_line)
+
+    # Running Footer on all pages
+    total_pages = len(doc)
+    for p_no in range(total_pages):
+        p = doc[p_no]
+        footer_text = f"ResearchLens Autonomous Academic Assistant   |   Page {p_no + 1} of {total_pages}"
+        p.draw_line(fitz.Point(margin, page_h - 32), fitz.Point(page_w - margin, page_h - 32), color=(0.88, 0.90, 0.94), width=0.5)
+        p.insert_text((margin, page_h - 20), footer_text, fontsize=7.5, fontname="helv", color=(0.55, 0.60, 0.68))
+
+    return doc.tobytes()
+
+
 # ── 6. Robust Pipeline Execution Thread ───────────────────────────────────────
 # Streamlit Execution Strategy:
 # - Streamlit script reruns from top-to-bottom on any widget change.
@@ -742,33 +948,42 @@ with tab_research:
                     rep = investigation.report
 
                     # Download Action Bar (Top)
+                    pdf_report = build_pdf_report(investigation)
                     md_report = build_markdown_report(investigation)
                     html_report = build_html_report(investigation)
                     json_investigation = json.dumps(investigation.model_dump(), indent=2)
 
-                    top_d1, top_d2, top_d3 = st.columns(3)
+                    top_d1, top_d2, top_d3, top_d4 = st.columns(4)
                     with top_d1:
                         st.download_button(
-                            label="📥 Download Report (.md)",
+                            label="📕 Download PDF (.pdf)",
+                            data=pdf_report,
+                            file_name=f"research_report_{investigation.id}.pdf",
+                            mime="application/pdf",
+                            key="dl_top_pdf",
+                            use_container_width=True,
+                        )
+                    with top_d2:
+                        st.download_button(
+                            label="📥 Markdown (.md)",
                             data=md_report,
                             file_name=f"research_report_{investigation.id}.md",
                             mime="text/markdown",
                             key="dl_top_md",
                             use_container_width=True,
                         )
-                    with top_d2:
+                    with top_d3:
                         st.download_button(
-                            label="📄 Printable HTML / PDF (.html)",
+                            label="📄 Printable HTML (.html)",
                             data=html_report,
                             file_name=f"research_report_{investigation.id}.html",
                             mime="text/html",
                             key="dl_top_html",
-                            help="Open in browser and press Ctrl+P to Save as PDF",
                             use_container_width=True,
                         )
-                    with top_d3:
+                    with top_d4:
                         st.download_button(
-                            label="📊 Download Full Data (.json)",
+                            label="📊 Raw Data (.json)",
                             data=json_investigation,
                             file_name=f"investigation_{investigation.id}.json",
                             mime="application/json",
@@ -837,29 +1052,37 @@ with tab_research:
                     # Downloads
                     st.divider()
                     st.subheader("📥 Export & Download Report")
-                    down_col1, down_col2, down_col3 = st.columns(3)
+                    down_col1, down_col2, down_col3, down_col4 = st.columns(4)
                     with down_col1:
                         st.download_button(
-                            label="📥 Download Report (.md)",
+                            label="📕 Download PDF (.pdf)",
+                            data=pdf_report,
+                            file_name=f"research_report_{investigation.id}.pdf",
+                            mime="application/pdf",
+                            key="dl_bot_pdf",
+                            use_container_width=True,
+                        )
+                    with down_col2:
+                        st.download_button(
+                            label="📥 Markdown (.md)",
                             data=md_report,
                             file_name=f"research_report_{investigation.id}.md",
                             mime="text/markdown",
                             key="dl_bot_md",
                             use_container_width=True,
                         )
-                    with down_col2:
+                    with down_col3:
                         st.download_button(
-                            label="📄 Printable HTML / PDF (.html)",
+                            label="📄 Printable HTML (.html)",
                             data=html_report,
                             file_name=f"research_report_{investigation.id}.html",
                             mime="text/html",
                             key="dl_bot_html",
-                            help="Open in browser and press Ctrl+P to Save as PDF",
                             use_container_width=True,
                         )
-                    with down_col3:
+                    with down_col4:
                         st.download_button(
-                            label="📊 Download Full Data (.json)",
+                            label="📊 Raw Data (.json)",
                             data=json_investigation,
                             file_name=f"investigation_{investigation.id}.json",
                             mime="application/json",
