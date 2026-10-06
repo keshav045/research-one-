@@ -43,6 +43,8 @@ pdf_cache/
 .env.local
 .env.*.local
 backend/.env
+.streamlit/secrets.toml
+researchlens_st.db
 # .env.example files are intentionally NOT ignored (safe templates only)
 
 # ─── Editor ───────────────────────────────────────────────────────────────────

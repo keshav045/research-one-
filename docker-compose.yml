@@ -34,21 +34,6 @@ services:
       timeout: 10s
       retries: 3
 
-  # ── React Frontend (production build served by Nginx) ─────────────────────
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.frontend
-      args:
-        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
-    container_name: researchlens-frontend
-    restart: unless-stopped
-    ports:
-      - "80:80"
-    depends_on:
-      backend:
-        condition: service_healthy
-
 volumes:
   researchlens_data:
   huggingface_cache:

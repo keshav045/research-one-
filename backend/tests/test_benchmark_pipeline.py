@@ -109,4 +109,4 @@ async def test_benchmark_pipeline():
 
 
 if __name__ == "__main__":
-    asyncio.run(run_benchmark())
+    asyncio.run(test_benchmark_pipeline())

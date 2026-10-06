@@ -160,14 +160,16 @@ app = FastAPI(
 )
 
 # ── CORS ───────────────────────────────────────────────────────────────────────
-# Allows local dev servers, Netlify deploy URLs (*.netlify.app), and custom CORS_ORIGINS
+# Allows local dev servers, Streamlit, and custom CORS_ORIGINS
 _cors_origins_env = os.getenv("CORS_ORIGINS", "")
 _allowed_origins = [
     "http://localhost:5173",
     "http://localhost:5174",
     "http://localhost:5175",
+    "http://localhost:8501",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:5174",
+    "http://127.0.0.1:8501",
 ]
 if _cors_origins_env:
     for _origin in _cors_origins_env.split(","):
@@ -176,10 +178,11 @@ if _cors_origins_env:
             _allowed_origins.append(_cleaned)
 
 _has_wildcard = "*" in _allowed_origins
+_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins if not _has_wildcard else ["*"],
-    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX") or r"https://.*\.netlify\.app",
+    allow_origin_regex=_origin_regex,
     allow_credentials=not _has_wildcard,
     allow_methods=["*"],
     allow_headers=["*"],

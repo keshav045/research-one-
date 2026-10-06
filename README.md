@@ -22,8 +22,8 @@ The engine prioritizes evidence integrity over generated prose. Every factual cl
 
 ## Tech Stack
 
-- **Frontend**: React 19, TypeScript, Vite, Tailwind CSS
-- **Backend**: Python 3.11, FastAPI, SQLAlchemy, SQLite
+- **UI / Frontend**: Streamlit
+- **Backend API**: Python 3.11, FastAPI, SQLAlchemy, SQLite
 - **PDF Extraction**: PyMuPDF (`fitz`)
 - **Embeddings**: Sentence Transformers (`BAAI/bge-small-en-v1.5`)
 - **Claim Verification**: Hugging Face DeBERTa-v3 NLI (`MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli`)
@@ -34,6 +34,7 @@ The engine prioritizes evidence integrity over generated prose. Every factual cl
 ## Project Structure
 
 ```
+├── streamlit_app.py                # Streamlit user interface
 ├── backend/
 │   ├── main.py                     # FastAPI application and lifespan management
 │   ├── config.py                   # Environment settings and threshold constants
@@ -53,14 +54,10 @@ The engine prioritizes evidence integrity over generated prose. Every factual cl
 │   │   ├── local_llm_service.py    # Report synthesis and citation validation
 │   │   └── query_planner.py        # Question classification and sub-query generation
 │   └── tests/                      # Pytest test suite
-├── src/                            # React 19 frontend application
-│   ├── components/                 # UI panels (report, papers, evidence, progress)
-│   ├── services/api.ts             # API client connecting to backend
-│   └── types/index.ts              # TypeScript interface definitions
-├── public/                         # Static assets and Netlify redirect rules
 ├── scripts/                        # Benchmark and validation scripts
-├── netlify.toml                    # Netlify frontend build and routing configuration
-└── render.yaml                     # Render backend blueprint specification
+├── docker-compose.yml              # Container orchestration
+├── requirements.txt                # Unified Python dependencies
+└── requirements-streamlit.txt      # Streamlit Community Cloud dependencies
 ```
 
 ---
@@ -114,16 +111,16 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 The API will be available at `http://localhost:8000`. You can check the health status at `http://localhost:8000/health` and browse the interactive docs at `http://localhost:8000/docs`.
 
-### 2. Frontend Setup
+### 2. Streamlit UI Setup
 
 From the root project directory:
 
 ```bash
-npm install
-npm run dev
+pip install -r requirements-streamlit.txt
+streamlit run streamlit_app.py
 ```
 
-The frontend will run at `http://localhost:5173`.
+The Streamlit interface will open at `http://localhost:8501`.
 
 ---
 
@@ -134,54 +131,23 @@ The test suite covers unit tests, pipeline stages, citation boundaries, and pape
 ```bash
 # Run backend tests
 pytest backend/tests
-
-# Run frontend typecheck
-npx tsc --noEmit
-
-# Test production frontend build
-npm run build
 ```
 
 ---
 
-## Deployment
+## Deployment & Production
 
-### Backend on Render
+### Containerized Deployment (Docker Compose)
 
-1. Create a new Web Service on Render from your Git repository.
-2. Set the following build and start commands:
-   - **Environment**: Python 3
-   - **Build Command**:
-     ```bash
-     pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && pip install --no-cache-dir -r backend/requirements.txt
-     ```
-   - **Start Command**:
-     ```bash
-     uvicorn backend.main:app --host 0.0.0.0 --port $PORT
-     ```
-3. Set these environment variables in Render:
-   - `PYTHON_VERSION`: `3.11.9`
-   - `HOST`: `0.0.0.0`
-   - `LLM_PROVIDER`: `gemini`
-   - `GEMINI_API_KEY`: your Gemini API key
-   - `GEMINI_MODEL`: `gemini-2.0-flash`
-   - `NLI_DEVICE`: `cpu`
-   - `CORS_ORIGINS`: `*`
-   - `OPENALEX_EMAIL`: your email address
-   - `SKIP_MODEL_WARMUP`: `true`
-4. Once deployed, note your service URL (for example, `https://researchlens-backend.onrender.com`).
+Run the backend stack with Docker Compose:
 
-### Frontend on Netlify
+```bash
+docker compose up -d --build
+```
 
-1. Connect your repository to Netlify.
-2. Netlify reads the build settings from `netlify.toml` automatically:
-   - **Build command**: `npm run build`
-   - **Publish directory**: `dist`
-3. Add one environment variable in Netlify Site Configuration:
-   - `VITE_API_URL`: your Render backend URL (for example, `https://researchlens-backend.onrender.com`, without trailing slash)
-4. Deploy the site.
+### Standalone Streamlit Cloud
 
----
+For deployment instructions on Streamlit Community Cloud, refer to [DEPLOY_STREAMLIT.md](./DEPLOY_STREAMLIT.md).
 
 ## License
 
