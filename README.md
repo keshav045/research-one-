@@ -1,3 +1,14 @@
+---
+title: ResearchLens
+emoji: 🔬
+colorFrom: blue
+colorTo: indigo
+sdk: streamlit
+sdk_version: "1.35.0"
+app_file: streamlit_app.py
+pinned: false
+---
+
 # ResearchLens
 
 ResearchLens is an autonomous academic research assistant that searches open-access literature, extracts full text from PDFs, validates factual assertions using natural language inference (NLI), and synthesizes cited research reports.
