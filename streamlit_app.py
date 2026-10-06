@@ -253,6 +253,116 @@ def build_markdown_report(inv: ResearchInvestigation) -> str:
     return "\n".join(lines)
 
 
+def build_html_report(inv: ResearchInvestigation) -> str:
+    """Construct a clean, printable HTML document with academic styling for PDF export."""
+    if not inv.report:
+        return f"<!DOCTYPE html><html><body><h1>{inv.question}</h1><p>Status: {inv.status}</p></body></html>"
+
+    rep = inv.report
+
+    # Format comparison table if available
+    comp_html = ""
+    if rep.comparisonTable:
+        rows = "".join([
+            f"<tr><td><strong>{r.model}</strong></td><td>{r.dataset}</td><td>{r.f1Score if r.f1Score != 'Not extracted' else r.mapScore}</td><td>{r.venue or ''} {r.year or ''}</td><td>{r.citationCount or ''}</td></tr>"
+            for r in rep.comparisonTable
+        ])
+        comp_html = f"""
+        <h2>Methodological Comparison</h2>
+        <table border="1" cellpadding="8" cellspacing="0" style="width:100%; border-collapse:collapse; margin-bottom:24px; font-size:0.9rem;">
+          <tr style="background:#f1f5f9; text-align:left;">
+            <th>Model / Approach</th><th>Dataset</th><th>Metric</th><th>Venue / Year</th><th>Citations</th>
+          </tr>
+          {rows}
+        </table>
+        """
+
+    # Format findings
+    findings_html = ""
+    if rep.findings:
+        findings_html = "<h2>Detailed Research Findings</h2>"
+        for sec in rep.findings:
+            findings_html += f"<h3>{sec.sectionTitle}</h3>"
+            for p in sec.paragraphs:
+                badges = "".join([
+                    f"<span style='background:#065F46;color:#FFF;padding:2px 6px;border-radius:4px;font-size:0.75rem;margin-left:4px;'>[{c.badgeNumber}] {c.paperTitle}</span>"
+                    for c in p.citations
+                ])
+                findings_html += f"<p>{p.text} {badges}</p>"
+
+    # Format limitations
+    limitations_html = ""
+    if rep.limitations:
+        lims = "".join([f"<li>{lim}</li>" for lim in rep.limitations])
+        limitations_html = f"<h2>Limitations &amp; Boundary Conditions</h2><ul>{lims}</ul>"
+
+    # Format conclusion
+    conclusion_html = ""
+    if rep.conclusion:
+        conclusion_html = f"<h2>Conclusion</h2><p>{rep.conclusion}</p>"
+
+    # Format references
+    references_html = ""
+    if rep.references:
+        refs = "".join([
+            f"<li><strong>{r.title}</strong> ({r.publicationYear}). {', '.join(r.authors[:3])}. <em>{r.journalConference or r.source}</em></li>"
+            for r in rep.references
+        ])
+        references_html = f"<h2>References</h2><ol>{refs}</ol>"
+
+    created = inv.createdAt[:10] if inv.createdAt else datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ResearchLens — {inv.question}</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.6;
+      max-width: 860px;
+      margin: 40px auto;
+      padding: 0 24px;
+      color: #0f172a;
+    }}
+    h1 {{ border-bottom: 2px solid #0f172a; padding-bottom: 10px; font-size: 1.8rem; margin-bottom: 12px; }}
+    h2 {{ border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin-top: 28px; font-size: 1.3rem; color: #1e293b; }}
+    h3 {{ margin-top: 18px; font-size: 1.1rem; color: #334155; }}
+    p {{ margin: 10px 0; }}
+    .meta-box {{
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 12px 18px;
+      margin-bottom: 24px;
+      font-size: 0.9rem;
+      color: #475569;
+    }}
+    @media print {{
+      body {{ max-width: 100%; margin: 0; padding: 12px; }}
+    }}
+  </style>
+</head>
+<body>
+  <h1>🔬 {inv.question}</h1>
+  <div class="meta-box">
+    <strong>Date:</strong> {created} &nbsp;|&nbsp;
+    <strong>Confidence:</strong> {inv.research_confidence} &nbsp;|&nbsp;
+    <strong>Citation Integrity:</strong> {inv.citation_integrity}% &nbsp;|&nbsp;
+    <strong>Papers Analyzed:</strong> {inv.papersAnalyzed}
+  </div>
+  <h2>Executive Summary</h2>
+  <p>{rep.executiveSummary}</p>
+  {comp_html}
+  {findings_html}
+  {limitations_html}
+  {conclusion_html}
+  {references_html}
+</body>
+</html>"""
+
+
 # ── 6. Robust Pipeline Execution Thread ───────────────────────────────────────
 # Streamlit Execution Strategy:
 # - Streamlit script reruns from top-to-bottom on any widget change.
@@ -631,6 +741,43 @@ with tab_research:
                 if investigation.report:
                     rep = investigation.report
 
+                    # Download Action Bar (Top)
+                    md_report = build_markdown_report(investigation)
+                    html_report = build_html_report(investigation)
+                    json_investigation = json.dumps(investigation.model_dump(), indent=2)
+
+                    top_d1, top_d2, top_d3 = st.columns(3)
+                    with top_d1:
+                        st.download_button(
+                            label="📥 Download Report (.md)",
+                            data=md_report,
+                            file_name=f"research_report_{investigation.id}.md",
+                            mime="text/markdown",
+                            key="dl_top_md",
+                            use_container_width=True,
+                        )
+                    with top_d2:
+                        st.download_button(
+                            label="📄 Printable HTML / PDF (.html)",
+                            data=html_report,
+                            file_name=f"research_report_{investigation.id}.html",
+                            mime="text/html",
+                            key="dl_top_html",
+                            help="Open in browser and press Ctrl+P to Save as PDF",
+                            use_container_width=True,
+                        )
+                    with top_d3:
+                        st.download_button(
+                            label="📊 Download Full Data (.json)",
+                            data=json_investigation,
+                            file_name=f"investigation_{investigation.id}.json",
+                            mime="application/json",
+                            key="dl_top_json",
+                            use_container_width=True,
+                        )
+
+                    st.divider()
+
                     # Executive Summary
                     st.subheader("Executive Summary")
                     st.markdown(rep.executiveSummary)
@@ -689,23 +836,34 @@ with tab_research:
 
                     # Downloads
                     st.divider()
-                    down_col1, down_col2 = st.columns(2)
+                    st.subheader("📥 Export & Download Report")
+                    down_col1, down_col2, down_col3 = st.columns(3)
                     with down_col1:
-                        md_report = build_markdown_report(investigation)
                         st.download_button(
                             label="📥 Download Report (.md)",
                             data=md_report,
                             file_name=f"research_report_{investigation.id}.md",
                             mime="text/markdown",
+                            key="dl_bot_md",
                             use_container_width=True,
                         )
                     with down_col2:
-                        json_investigation = json.dumps(investigation.model_dump(), indent=2)
                         st.download_button(
-                            label="📥 Download Full Data (.json)",
+                            label="📄 Printable HTML / PDF (.html)",
+                            data=html_report,
+                            file_name=f"research_report_{investigation.id}.html",
+                            mime="text/html",
+                            key="dl_bot_html",
+                            help="Open in browser and press Ctrl+P to Save as PDF",
+                            use_container_width=True,
+                        )
+                    with down_col3:
+                        st.download_button(
+                            label="📊 Download Full Data (.json)",
                             data=json_investigation,
                             file_name=f"investigation_{investigation.id}.json",
                             mime="application/json",
+                            key="dl_bot_json",
                             use_container_width=True,
                         )
                 else:
