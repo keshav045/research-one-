@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Sidebar, 
   NavigationTab 
 } from './components/shell/Sidebar';
 import { TopBar } from './components/shell/TopBar';
+import { MobileBottomNav } from './components/shell/MobileBottomNav';
 import { ResearchHome } from './components/home/ResearchHome';
 import { ResearchProgress } from './components/workspace/ResearchProgress';
 import { ReportViewer } from './components/report/ReportViewer';
@@ -36,7 +37,7 @@ export const App: React.FC = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Investigation & Research State — starts completely empty
+  // Investigation & Research State
   const [activeInvestigation, setActiveInvestigation] = useState<ResearchInvestigation | null>(null);
   const [historyList, setHistoryList] = useState<ResearchInvestigation[]>([]);
   const [papers, setPapers] = useState<Paper[]>([]);
@@ -62,7 +63,7 @@ export const App: React.FC = () => {
 
   const DEFAULT_SETTINGS: AppSettings = {
     llmProvider: 'Gemini',
-    geminiModel: 'gemini-3.5-flash-lite',
+    geminiModel: 'gemini-2.0-flash',
     openaiModel: 'gpt-4o',
     maxPapers: 12,
     researchDepth: 'Standard',
@@ -80,7 +81,7 @@ export const App: React.FC = () => {
       const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
       if (saved) return { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
     } catch {
-      // fallback to defaults
+      // fallback
     }
     return DEFAULT_SETTINGS;
   });
@@ -89,9 +90,7 @@ export const App: React.FC = () => {
   useEffect(() => {
     try {
       localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
-    } catch {
-      // ignore
-    }
+    } catch {}
 
     const applyTheme = (isDark: boolean) => {
       if (isDark) {
@@ -108,7 +107,6 @@ export const App: React.FC = () => {
     } else if (settings.appearance === 'Light') {
       applyTheme(false);
     } else {
-      // System
       const media = window.matchMedia('(prefers-color-scheme: dark)');
       applyTheme(media.matches);
       const listener = (e: MediaQueryListEvent) => applyTheme(e.matches);
@@ -122,6 +120,60 @@ export const App: React.FC = () => {
     const newAppearance = isCurrentlyDark ? 'Light' : 'Dark';
     setSettings(prev => ({ ...prev, appearance: newAppearance }));
   };
+
+  /**
+   * Helper to load an investigation's papers, citations, and derived evidence
+   */
+  const loadInvestigationData = useCallback(async (inv: ResearchInvestigation) => {
+    setActiveInvestigation(inv);
+    
+    // Fetch papers from API/Mock
+    const jobPapers = await api.getJobPapers(inv.id);
+    const allPapers = jobPapers.length > 0 ? jobPapers : ((inv as any).papers || inv.report?.references || []);
+    setPapers(allPapers);
+
+    // Extract citations from report findings
+    const extractedCitations: Citation[] = [];
+    if (inv.report?.findings) {
+      for (const sec of inv.report.findings) {
+        for (const p of sec.paragraphs) {
+          if (p.citations) {
+            for (const c of p.citations) {
+              if (!extractedCitations.some(ec => ec.id === c.id)) {
+                extractedCitations.push(c);
+              }
+            }
+          }
+        }
+      }
+    }
+    setCitations(extractedCitations);
+
+    // Build evidence explorer items
+    const derivedEvidence: EvidenceItem[] = extractedCitations.map((c, idx) => {
+      const comp = inv.report?.comparisonTable?.find(r => r.citationId === c.id);
+      return {
+        id: `evidence-${idx + 1}`,
+        evidenceNumber: idx + 1,
+        paperId: c.paperId,
+        paperTitle: c.paperTitle,
+        authors: c.authors,
+        year: c.year,
+        model: comp ? comp.model : (c.claim.split(' ')[0] || 'Model'),
+        dataset: comp ? comp.dataset : 'Benchmark Evaluation',
+        metric: comp ? 'Throughput / Quality' : 'Empirical Claim',
+        value: comp ? (comp.fpsThroughput || comp.f1Score || 'Reported Result') : 'Verified passage',
+        page: c.page,
+        status: c.status,
+        passage: c.passage,
+        highlightSentence: c.highlightSentence,
+        evidenceType: 'Extracted Passage',
+        atomicClaims: c.atomicClaims,
+        entailmentScore: c.entailmentScore,
+      };
+    });
+    setEvidenceList(derivedEvidence);
+  }, []);
 
   // Load history on mount
   useEffect(() => {
@@ -156,11 +208,17 @@ export const App: React.FC = () => {
       setActiveInvestigation(newJob);
       setCurrentTab('workspace');
     } catch (err: any) {
-      alert(`Could not start research: ${err?.message || err}`);
+      console.error('[StartResearch] Error:', err);
     }
   };
 
-  // Polling backend while investigation is in progress
+  // Handler: Select a pre-computed sample benchmark study (1-tap demo on mobile)
+  const handleSelectSampleInvestigation = async (inv: ResearchInvestigation) => {
+    await loadInvestigationData(inv);
+    setCurrentTab('report');
+  };
+
+  // Polling backend/simulation while investigation is in progress
   useEffect(() => {
     if (!activeInvestigation || activeInvestigation.status !== 'in_progress') {
       return;
@@ -175,53 +233,7 @@ export const App: React.FC = () => {
 
         const finalStatuses = ['completed', 'completed_with_warnings', 'insufficient_evidence', 'failed'];
         if (finalStatuses.includes(fresh.status)) {
-          // Fetch real papers from DB
-          const jobPapers = await api.getJobPapers(fresh.id);
-          const allPapers = jobPapers.length > 0 ? jobPapers : (fresh.report?.references || []);
-          setPapers(allPapers);
-
-          // Extract citations from report findings
-          const extractedCitations: Citation[] = [];
-          if (fresh.report?.findings) {
-            for (const sec of fresh.report.findings) {
-              for (const p of sec.paragraphs) {
-                if (p.citations) {
-                  for (const c of p.citations) {
-                    if (!extractedCitations.some(ec => ec.id === c.id)) {
-                      extractedCitations.push(c);
-                    }
-                  }
-                }
-              }
-            }
-          }
-          setCitations(extractedCitations);
-
-          // Build evidence explorer items
-          const derivedEvidence: EvidenceItem[] = extractedCitations.map((c, idx) => {
-            const comp = fresh.report?.comparisonTable?.find(r => r.citationId === c.id);
-            return {
-              id: `evidence-${idx + 1}`,
-              evidenceNumber: idx + 1,
-              paperId: c.paperId,
-              paperTitle: c.paperTitle,
-              authors: c.authors,
-              year: c.year,
-              model: comp ? comp.model : (c.claim.split(' ')[0] || 'Model'),
-              dataset: comp ? comp.dataset : 'Benchmark Evaluation',
-              metric: comp ? 'Throughput / Quality' : 'Empirical Claim',
-              value: comp ? (comp.fpsThroughput || comp.f1Score || 'Reported Result') : 'Verified passage',
-              page: c.page,
-              status: c.status,
-              passage: c.passage,
-              highlightSentence: c.highlightSentence,
-              evidenceType: 'Extracted Passage',
-              atomicClaims: c.atomicClaims,
-              entailmentScore: c.entailmentScore,
-            };
-          });
-          setEvidenceList(derivedEvidence);
-
+          await loadInvestigationData(fresh);
           setHistoryList(prev => [fresh, ...prev.filter(h => h.id !== fresh.id)]);
           if (fresh.status !== 'failed') {
             setCurrentTab('report');
@@ -231,11 +243,10 @@ export const App: React.FC = () => {
       } catch (err) {
         console.error('[Polling] Error fetching job status:', err);
       }
-    }, 1500);
+    }, 1200);
 
     return () => clearInterval(interval);
-  }, [activeInvestigation?.id, activeInvestigation?.status]);
-
+  }, [activeInvestigation?.id, activeInvestigation?.status, loadInvestigationData]);
 
   // Handler: Select Citation from report
   const handleSelectCitation = (citation: Citation) => {
@@ -248,15 +259,22 @@ export const App: React.FC = () => {
   const handleSelectCitationById = (id: string) => {
     let found = citations.find(c => c.id === id);
     if (!found && activeInvestigation?.report) {
-      for (const sec of activeInvestigation.report.findings) {
-        for (const p of sec.paragraphs) {
+      for (const f of activeInvestigation.report.findings) {
+        for (const p of f.paragraphs) {
           const match = p.citations?.find(c => c.id === id);
-          if (match) { found = match; break; }
+          if (match) {
+            found = match;
+            break;
+          }
         }
         if (found) break;
       }
     }
-    if (found) handleSelectCitation(found);
+    if (found) {
+      setSelectedCitation(found);
+      setSelectedEvidenceItem(null);
+      setEvidencePanelOpen(true);
+    }
   };
 
   // Handler: Inspect evidence item from Evidence Explorer
@@ -277,7 +295,7 @@ export const App: React.FC = () => {
 
   return (
     <div className="flex h-screen bg-white text-gray-900 overflow-hidden font-sans antialiased">
-      {/* 1. Left Navigation Sidebar */}
+      {/* 1. Left Navigation Sidebar (Desktop dock + Mobile off-canvas drawer) */}
       <Sidebar
         currentTab={currentTab}
         onSelectTab={(tab) => {
@@ -288,20 +306,17 @@ export const App: React.FC = () => {
           setCurrentTab('home');
           setMobileMenuOpen(false);
         }}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => {
+          setSettingsOpen(true);
+          setMobileMenuOpen(false);
+        }}
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+        isOpenOnMobile={mobileMenuOpen}
+        onCloseMobile={() => setMobileMenuOpen(false)}
       />
 
-      {/* Mobile Drawer Overlay */}
-      {mobileMenuOpen && (
-        <div 
-          onClick={() => setMobileMenuOpen(false)}
-          className="fixed inset-0 bg-black/50 z-40 md:hidden"
-        />
-      )}
-
-      {/* 2. Main Content Area */}
+      {/* 2. Main Content Canvas */}
       <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
         <TopBar
           investigation={activeInvestigation}
@@ -315,13 +330,16 @@ export const App: React.FC = () => {
           onToggleTheme={handleToggleTheme}
         />
 
-        <div className="flex-1 flex min-h-0 overflow-hidden">
+        <div className="flex-1 flex min-h-0 overflow-hidden relative">
           {/* Main Scrollable Canvas */}
           <main className="flex-1 overflow-y-auto min-w-0">
 
             {/* Home — research question form */}
             {currentTab === 'home' && (
-              <ResearchHome onStartResearch={handleStartResearch} />
+              <ResearchHome 
+                onStartResearch={handleStartResearch} 
+                onSelectSampleInvestigation={handleSelectSampleInvestigation}
+              />
             )}
 
             {/* Workspace — live pipeline progress */}
@@ -357,7 +375,7 @@ export const App: React.FC = () => {
               <div className="max-w-2xl mx-auto px-4 py-12">
                 <EmptyState
                   title="No report yet"
-                  description="Complete a research investigation to generate a synthesis report with citation verification."
+                  description="Complete a research investigation or pick an instant benchmark study to generate a verified synthesis report."
                   actionText="Start Research"
                   onAction={() => setCurrentTab('home')}
                 />
@@ -384,7 +402,7 @@ export const App: React.FC = () => {
               <div className="max-w-2xl mx-auto px-4 py-12">
                 <EmptyState
                   title="No citation data yet"
-                  description="Run a research investigation to see citation integrity analysis here."
+                  description="Run a research investigation or inspect an instant benchmark to see citation integrity analysis."
                   actionText="Start Research"
                   onAction={() => setCurrentTab('home')}
                 />
@@ -404,36 +422,22 @@ export const App: React.FC = () => {
             {currentTab === 'history' && (
               <HistoryView
                 history={historyList}
-                onSelectInvestigation={(inv) => {
-                  setActiveInvestigation(inv);
+                onSelectInvestigation={async (inv) => {
+                  await loadInvestigationData(inv);
                   setCurrentTab('report');
                 }}
                 onNewResearch={() => setCurrentTab('home')}
                 onDeleteInvestigation={(targetItem) => {
-                  setHistoryList(prev => {
-                    const idx = prev.indexOf(targetItem);
-                    if (idx !== -1) {
-                      return prev.filter((_, i) => i !== idx);
-                    }
-                    let removed = false;
-                    return prev.filter(h => {
-                      if (!removed && h.id === targetItem.id) {
-                        removed = true;
-                        return false;
-                      }
-                      return true;
-                    });
-                  });
+                  setHistoryList(prev => prev.filter(h => h.id !== targetItem.id));
                 }}
                 onClearHistory={() => setHistoryList([])}
               />
             )}
 
-
           </main>
 
           {/* 3. Contextual Evidence Inspector Panel */}
-          {(currentTab === 'report' || currentTab === 'evidence') && evidencePanelOpen && (
+          {evidencePanelOpen && (
             <EvidencePanel
               isOpen={evidencePanelOpen}
               citation={selectedCitation || (citations.length > 0 ? citations[0] : null)}
@@ -443,6 +447,18 @@ export const App: React.FC = () => {
             />
           )}
         </div>
+
+        {/* 4. Mobile Bottom Navigation Bar (Smart Ergonomic Touch Controls) */}
+        <MobileBottomNav
+          currentTab={currentTab}
+          onSelectTab={(tab) => {
+            setCurrentTab(tab);
+            setMobileMenuOpen(false);
+          }}
+          onOpenMenu={() => setMobileMenuOpen(true)}
+          hasActiveReport={hasReport}
+          isRunning={activeInvestigation?.status === 'in_progress'}
+        />
       </div>
 
       {/* Global Modals */}

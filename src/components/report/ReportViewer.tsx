@@ -84,11 +84,11 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
   };
 
   return (
-    <article className="max-w-3xl mx-auto px-4 sm:px-8 py-8 space-y-10 text-gray-700 leading-relaxed">
+    <article className="max-w-3xl mx-auto px-3 sm:px-8 py-5 sm:py-8 pb-24 sm:pb-8 space-y-8 sm:space-y-10 text-gray-700 leading-relaxed">
       {/* Header — always shown */}
       <header className="space-y-4 pb-6 border-b border-gray-200">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className={`px-2 py-0.5 rounded border text-[11px] font-mono font-semibold uppercase ${
               isInsufficient ? 'border-orange-300 bg-orange-50 text-orange-700' :
               investigation.status === 'completed_with_warnings' ? 'border-amber-300 bg-amber-50 text-amber-800' :
@@ -105,12 +105,12 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
                 Confidence: {investigation.research_confidence}
               </span>
             )}
-            <span className="text-gray-300">•</span>
-            <span className="text-[11px] text-gray-400 font-mono">{investigation.id}</span>
+            <span className="text-gray-300 hidden sm:inline">•</span>
+            <span className="text-[11px] text-gray-400 font-mono hidden sm:inline">{investigation.id}</span>
           </div>
           <button
             onClick={onOpenIntegrityDashboard}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-gray-300 bg-white hover:border-black text-xs font-medium text-gray-700 hover:text-black transition-colors"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-300 bg-white hover:border-black text-xs font-medium text-gray-700 hover:text-black transition-colors"
           >
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" /> Citation Integrity: {investigation.citationCoverage != null ? `${investigation.citationCoverage}%` : 'N/A'}
           </button>
@@ -118,7 +118,7 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
 
         <div>
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Research Results</p>
-          <h1 className="text-xl sm:text-2xl font-bold text-gray-900 leading-snug">
+          <h1 className="text-lg sm:text-2xl font-bold text-gray-900 leading-snug">
             "{investigation.question}"
           </h1>
         </div>
@@ -129,7 +129,9 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({
           <StatCard label="Evidence" value={investigation.evidenceItems} subtext="items" icon={Layers} />
           <StatCard label="Verified" value={investigation.verifiedClaims} subtext="claims" icon={CheckCircle2} />
           <StatCard label="Conflicts" value={investigation.potentialConflicts} icon={AlertTriangle} onClick={onOpenIntegrityDashboard} />
-          <StatCard label="Citation Integrity" value={investigation.citationCoverage != null ? `${investigation.citationCoverage}%` : 'N/A'} icon={ShieldCheck} onClick={onOpenIntegrityDashboard} />
+          <div className="col-span-2 sm:col-span-1">
+            <StatCard label="Citation Integrity" value={investigation.citationCoverage != null ? `${investigation.citationCoverage}%` : 'N/A'} icon={ShieldCheck} onClick={onOpenIntegrityDashboard} />
+          </div>
         </div>
       </header>
 

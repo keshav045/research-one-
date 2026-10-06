@@ -67,7 +67,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   }, [history, query, activeFilter]);
 
   return (
-    <div className="max-w-4xl mx-auto px-4 py-8 space-y-6">
+    <div className="max-w-4xl mx-auto px-3 sm:px-4 py-5 sm:py-8 pb-24 sm:pb-8 space-y-5 sm:space-y-6">
       {/* 1. Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-gray-200">
         <div>

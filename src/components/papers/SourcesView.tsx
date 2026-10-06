@@ -21,14 +21,14 @@ export const SourcesView: React.FC<SourcesViewProps> = ({ papers, onSelectPaper,
   });
 
   return (
-    <div className="max-w-4xl mx-auto px-4 py-8 space-y-5">
+    <div className="max-w-4xl mx-auto px-3 sm:px-4 py-5 sm:py-8 pb-24 sm:pb-8 space-y-4 sm:space-y-5">
       <div className="flex items-center justify-between pb-4 border-b border-gray-200">
         <div>
           <div className="flex items-center gap-2 mb-1">
             <BookOpen className="w-5 h-5 text-gray-600" />
-            <h1 className="text-xl font-bold text-gray-900">Sources Library</h1>
+            <h1 className="text-lg sm:text-xl font-bold text-gray-900">Sources Library</h1>
           </div>
-          <p className="text-sm text-gray-500">{papers.length} sourced publications</p>
+          <p className="text-xs sm:text-sm text-gray-500">{papers.length} sourced publications</p>
         </div>
       </div>
 

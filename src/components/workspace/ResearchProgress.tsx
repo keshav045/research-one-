@@ -27,10 +27,10 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({ investigatio
     : 10;
 
   return (
-    <div className="max-w-3xl mx-auto px-4 py-8">
+    <div className="max-w-3xl mx-auto px-3 sm:px-4 py-5 sm:py-8 pb-24 sm:pb-8">
       {/* Header Card */}
-      <div className="bg-white border border-gray-200 rounded-lg p-6 mb-6 shadow-sm">
-        <div className="flex items-start justify-between gap-4 pb-4 border-b border-gray-100 mb-4">
+      <div className="bg-white border border-gray-200 rounded-xl p-4 sm:p-6 mb-5 sm:mb-6 shadow-xs">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-gray-100 mb-4">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 mb-2 flex-wrap">
               <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider font-mono">
@@ -58,7 +58,7 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({ investigatio
                   .replace(/\b\w/g, c => c.toUpperCase())}
               </span>
             </div>
-            <h2 className="text-lg font-bold text-gray-900 leading-snug break-words">
+            <h2 className="text-base sm:text-lg font-bold text-gray-900 leading-snug break-words">
               "{investigation.question}"
             </h2>
           </div>
@@ -66,7 +66,7 @@ export const ResearchProgress: React.FC<ResearchProgressProps> = ({ investigatio
           {(isFinished || isInsufficient) && onViewReport && (
             <button
               onClick={onViewReport}
-              className="shrink-0 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-black text-white text-xs font-semibold hover:bg-gray-800 transition-all shadow-sm"
+              className="w-full sm:w-auto shrink-0 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-black text-white text-xs font-semibold hover:bg-gray-800 transition-all shadow-sm"
             >
               View Synthesized Report →
             </button>

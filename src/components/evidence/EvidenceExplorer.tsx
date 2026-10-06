@@ -35,7 +35,7 @@ export const EvidenceExplorer: React.FC<EvidenceExplorerProps> = ({ evidenceList
   }, [evidenceList, searchQuery, filters]);
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-8 space-y-5">
+    <div className="max-w-5xl mx-auto px-3 sm:px-4 py-5 sm:py-8 pb-24 sm:pb-8 space-y-4 sm:space-y-5">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-gray-200">
         <div>
           <div className="flex items-center gap-2 mb-1">

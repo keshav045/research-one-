@@ -20,29 +20,37 @@ export const EvidencePanel: React.FC<EvidencePanelProps> = ({
   // Empty state when neither citation nor evidenceItem is selected
   if (!citation && !evidenceItem) {
     return (
-      <aside className="w-full xl:w-[380px] shrink-0 border-l border-gray-200 bg-white flex flex-col h-full z-20">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
-          <div className="flex items-center gap-2">
-            <FileText className="w-4 h-4 text-gray-500" />
-            <div>
-              <p className="text-xs font-bold text-gray-900 uppercase tracking-wider">Evidence Inspector</p>
-              <p className="text-[10px] text-gray-400">Contextual Verification</p>
+      <>
+        {/* Mobile Backdrop */}
+        <div 
+          onClick={onClose} 
+          className="fixed inset-0 bg-black/60 z-40 xl:hidden backdrop-blur-xs transition-opacity" 
+          aria-hidden="true"
+        />
+        <aside className="fixed inset-y-0 right-0 z-50 w-full sm:w-[420px] max-w-full bg-white border-l border-gray-200 flex flex-col h-full shadow-2xl xl:relative xl:shadow-none xl:z-20 xl:w-[380px] shrink-0">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
+            <div className="flex items-center gap-2">
+              <FileText className="w-4 h-4 text-gray-500" />
+              <div>
+                <p className="text-xs font-bold text-gray-900 uppercase tracking-wider">Evidence Inspector</p>
+                <p className="text-[10px] text-gray-400">Contextual Verification</p>
+              </div>
             </div>
+            <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-black hover:bg-gray-100 transition-colors" aria-label="Close panel">
+              <X className="w-4 h-4" />
+            </button>
           </div>
-          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-black hover:bg-gray-100 transition-colors" aria-label="Close panel">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-        <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-3">
-          <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center text-gray-400">
-            <BookOpen className="w-6 h-6" />
+          <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-3">
+            <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center text-gray-400">
+              <BookOpen className="w-6 h-6" />
+            </div>
+            <p className="text-sm font-semibold text-gray-800">No Citation Selected</p>
+            <p className="text-xs text-gray-500 leading-relaxed max-w-[260px]">
+              Click any interactive citation badge (e.g. <span className="font-bold font-mono text-gray-900">[1]</span>) in the synthesis report or an evidence card to inspect its sentence-level verification, extracted source passage, and primary document grounding.
+            </p>
           </div>
-          <p className="text-sm font-semibold text-gray-800">No Citation Selected</p>
-          <p className="text-xs text-gray-500 leading-relaxed max-w-[260px]">
-            Click any interactive citation badge (e.g. <span className="font-bold font-mono text-gray-900">[1]</span>) in the synthesis report or an evidence card to inspect its sentence-level verification, extracted source passage, and primary document grounding.
-          </p>
-        </div>
-      </aside>
+        </aside>
+      </>
     );
   }
 
@@ -118,7 +126,14 @@ export const EvidencePanel: React.FC<EvidencePanelProps> = ({
   };
 
   return (
-    <aside className="w-full xl:w-[380px] shrink-0 border-l border-gray-200 bg-white flex flex-col h-full z-20">
+    <>
+      {/* Mobile Backdrop */}
+      <div 
+        onClick={onClose} 
+        className="fixed inset-0 bg-black/60 z-40 xl:hidden backdrop-blur-xs transition-opacity" 
+        aria-hidden="true"
+      />
+      <aside className="fixed inset-y-0 right-0 z-50 w-full sm:w-[420px] max-w-full bg-white border-l border-gray-200 flex flex-col h-full shadow-2xl xl:relative xl:shadow-none xl:z-20 xl:w-[380px] shrink-0">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
         <div className="flex items-center gap-2">
@@ -262,5 +277,6 @@ export const EvidencePanel: React.FC<EvidencePanelProps> = ({
         </button>
       </div>
     </aside>
+    </>
   );
 };

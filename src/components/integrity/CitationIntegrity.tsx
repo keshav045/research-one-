@@ -78,18 +78,18 @@ export const CitationIntegrity: React.FC<CitationIntegrityProps> = ({
   const puncited = totalAssertions > 0 ? Math.max(0, 100 - (pv + pp + pu + pc))  : 0;
 
   return (
-    <div className="max-w-3xl mx-auto px-4 py-8 space-y-7">
+    <div className="max-w-3xl mx-auto px-3 sm:px-4 py-5 sm:py-8 pb-24 sm:pb-8 space-y-6 sm:space-y-7">
       {/* Header */}
       <div className="pb-4 border-b border-gray-200">
         <div className="flex items-center gap-2 mb-1">
           <ShieldCheck className="w-5 h-5 text-gray-700" />
-          <h1 className="text-xl font-bold text-gray-900">Citation Integrity</h1>
+          <h1 className="text-lg sm:text-xl font-bold text-gray-900">Citation Integrity</h1>
         </div>
-        <p className="text-sm text-gray-500">Sentence-level verification against full-text source publications</p>
+        <p className="text-xs sm:text-sm text-gray-500">Sentence-level verification against full-text source publications</p>
       </div>
 
       {/* Citation Integrity Card */}
-      <div className="bg-white border border-gray-200 rounded p-6 space-y-5">
+      <div className="bg-white border border-gray-200 rounded-xl p-4 sm:p-6 space-y-5 shadow-xs">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-gray-100">
           <div>
             <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Citation Integrity</p>
@@ -111,8 +111,8 @@ export const CitationIntegrity: React.FC<CitationIntegrityProps> = ({
               { label: 'Unsupported', value: u, icon: <XCircle className="w-3.5 h-3.5 text-gray-400" /> },
               { label: 'Conflicts', value: c, icon: <ArrowLeftRight className="w-3.5 h-3.5 text-rose-500" /> },
               { label: 'Uncited', value: uncitedCount, icon: <FileText className="w-3.5 h-3.5 text-amber-600" /> },
-            ].map(stat => (
-              <div key={stat.label} className="p-2.5 rounded border border-gray-200 text-center">
+            ].map((stat, idx) => (
+              <div key={stat.label} className={`p-2.5 rounded-lg border border-gray-200 text-center ${idx === 4 ? 'col-span-2 sm:col-span-1' : ''}`}>
                 <div className="flex justify-center mb-1">{stat.icon}</div>
                 <span className="block font-bold text-gray-900 font-mono text-base">{stat.value}</span>
                 <span className="text-[10px] text-gray-400">{stat.label}</span>
