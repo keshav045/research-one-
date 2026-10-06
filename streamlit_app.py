@@ -30,6 +30,17 @@ if str(_PROJECT_ROOT) not in sys.path:
 import psutil
 import streamlit as st
 
+# ── Defensive Compatibility Patch for torch.accelerator ─────────────────────────
+# In torch < 2.6, torch.accelerator does not exist. Transformers 4.49+ calls
+# torch.accelerator.current_accelerator() during import, causing an AttributeError.
+import torch
+if not hasattr(torch, "accelerator"):
+    class _DummyAccelerator:
+        @staticmethod
+        def current_accelerator():
+            return None
+    torch.accelerator = _DummyAccelerator()
+
 # ── Logging Setup ──────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,

@@ -19,6 +19,13 @@ import uuid
 from typing import Any, Optional, List, Tuple
 
 import torch
+if not hasattr(torch, "accelerator"):
+    class _DummyAccelerator:
+        @staticmethod
+        def current_accelerator():
+            return None
+    torch.accelerator = _DummyAccelerator()
+
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 from ..models.schemas import AtomicClaimVerification, EntailmentVerdict
