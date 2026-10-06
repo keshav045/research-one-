@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 
 # ── Model chains ──────────────────────────────────────────────────────────────
 
+OPENAI_MODEL_CHAIN = [
+    "gpt-4o-mini",
+    "gpt-4o",
+]
+
 QWEN_MODEL_CHAIN = [
     "qwen-plus",
     "qwen-turbo",
@@ -74,6 +79,43 @@ def _classify_question_type(question: str) -> str:
     if is_comparative:
         return "comparative_review"
     return "comparative_review"
+
+
+# ─── OpenAI API ───────────────────────────────────────────────────────────────
+
+async def _call_openai(model_name: str, prompt: str, retries: int = 2) -> str:
+    """Async wrapper for OpenAI API via the openai SDK."""
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+
+    for attempt in range(retries + 1):
+        try:
+            result = await client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are ResearchLens, an academic AI. "
+                            "Always respond with valid JSON and nothing else — no markdown fences."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.2,
+            )
+            return result.choices[0].message.content.strip()
+        except Exception as exc:
+            msg = str(exc)
+            is_retryable = any(code in msg for code in _RETRYABLE_CODES)
+            if is_retryable and attempt < retries:
+                wait = (attempt + 1) * 3
+                logger.warning("[OpenAI] %s attempt %d failed (%s). Retrying in %ds…", model_name, attempt + 1, msg[:80], wait)
+                await asyncio.sleep(wait)
+            else:
+                raise
 
 
 # ─── Qwen API (OpenAI-compatible) ─────────────────────────────────────────────
@@ -381,26 +423,24 @@ async def generate_report_with_gemini(
     prompt = _build_prompt(question, depth, sources, papers)
     provider = settings.LLM_PROVIDER.lower()
 
-    # ── Option 1: Local HuggingFace model (no API key) ────────────────────────
-    if provider == "local":
-        from .local_llm_service import generate_report_with_local_llm
-        logger.info("[LLM] Using local HuggingFace model: %s", settings.LOCAL_LLM_MODEL)
-        report = await generate_report_with_local_llm(question, depth, sources, papers)
-        if report:
-            return report
-        logger.warning("[LLM] Local LLM failed, falling back to cloud providers…")
-
-    # ── Option 2: Qwen API ────────────────────────────────────────────────────
-    if provider in ("qwen", "local"):  # also try qwen as fallback from local
-        if settings.is_qwen_configured:
-            report = await _try_models(QWEN_MODEL_CHAIN, _call_qwen, prompt, papers, "Qwen")
+    # ── Option 1: OpenAI API ──────────────────────────────────────────────────
+    if provider == "openai" or settings.is_openai_configured:
+        if settings.is_openai_configured:
+            report = await _try_models(OPENAI_MODEL_CHAIN, _call_openai, prompt, papers, "OpenAI")
             if report:
                 return report
-            logger.warning("[LLM] Qwen chain exhausted, trying Gemini…")
+            logger.warning("[LLM] OpenAI chain exhausted, trying fallbacks…")
 
-    # ── Option 3: Gemini API ──────────────────────────────────────────────────
+    # ── Option 2: Gemini API ──────────────────────────────────────────────────
     if settings.is_gemini_configured:
         report = await _try_models(GEMINI_MODEL_CHAIN, _call_gemini, prompt, papers, "Gemini")
+        if report:
+            return report
+        logger.warning("[LLM] Gemini chain exhausted, trying Qwen…")
+
+    # ── Option 3: Qwen API ────────────────────────────────────────────────────
+    if settings.is_qwen_configured:
+        report = await _try_models(QWEN_MODEL_CHAIN, _call_qwen, prompt, papers, "Qwen")
         if report:
             return report
 
@@ -417,6 +457,16 @@ async def generate_text_simple(prompt: str, max_tokens: int = 512) -> str:
     """
     provider = settings.LLM_PROVIDER.lower()
     try:
+        if (provider == "openai" or settings.is_openai_configured) and settings.is_openai_configured:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+            resp = await client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=0.3,
+            )
+            return resp.choices[0].message.content or ""
         if provider == "qwen" and settings.is_qwen_configured:
             from openai import AsyncOpenAI
             client = AsyncOpenAI(

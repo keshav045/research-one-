@@ -65,6 +65,7 @@ async def lifespan(app: FastAPI):
     logger.info("=== ResearchLens Backend starting ===")
     logger.info("S2 key loaded: %s", bool(settings.SEMANTIC_SCHOLAR_API_KEY.strip()))
     logger.info("Database: %s", settings.DATABASE_URL)
+    logger.info("OpenAI configured: %s (model: %s)", settings.is_openai_configured, settings.OPENAI_MODEL)
     logger.info("Gemini configured: %s", settings.is_gemini_configured)
     logger.info("NLI model: %s", settings.NLI_MODEL)
     logger.info("Embedding model: %s", settings.EMBEDDING_MODEL)
@@ -83,15 +84,43 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-    # Optional model pre-warmup (default: skipped to enable fast boot and stay within 512MB RAM)
-    skip_warmup = os.getenv("SKIP_MODEL_WARMUP", "true").lower() in ("1", "true", "yes")
+    # Model pre-warmup (skip when SKIP_MODEL_WARMUP=true to enable fast cloud boot on low RAM)
+    skip_warmup = os.getenv("SKIP_MODEL_WARMUP", "false").lower() in ("1", "true", "yes")
     if not skip_warmup:
-        logger.info("[Startup] Warming up ML models...")
+        import time
+
+        t0 = time.time()
         try:
             from .services.embeddings import get_model as get_embedding_model
             get_embedding_model()
+            logger.info("[Startup] Embedding model warmed up in %.2fs", time.time() - t0)
         except Exception as exc:
-            logger.warning("[Startup] Embedding warmup failed: %s", exc)
+            logger.warning("[Startup] Embedding model warmup failed: %s", exc)
+
+        t0 = time.time()
+        try:
+            from .services.ranker import get_reranker
+            get_reranker()
+            logger.info("[Startup] Reranker model warmed up in %.2fs", time.time() - t0)
+        except Exception as exc:
+            logger.warning("[Startup] Reranker model warmup failed: %s", exc)
+
+        t0 = time.time()
+        try:
+            from .services.nli_verifier import get_nli_components
+            get_nli_components()
+            logger.info("[Startup] NLI model warmed up in %.2fs", time.time() - t0)
+        except Exception as exc:
+            logger.warning("[Startup] NLI model warmup failed: %s", exc)
+
+        if settings.LLM_PROVIDER.lower() == "ollama":
+            t0 = time.time()
+            try:
+                from .services.local_llm_service import _call_ollama
+                await _call_ollama("warmup", max_tokens=1)
+                logger.info("[Startup] Ollama 1-token warmup call completed in %.2fs", time.time() - t0)
+            except Exception as exc:
+                logger.warning("[Startup] Ollama warmup failed: %s", exc)
     else:
         logger.info("[Startup] Model pre-warmup skipped (models will load lazily on demand to conserve RAM)")
 
@@ -150,9 +179,10 @@ async def health():
         "status": "ok",
         "llm_provider": settings.LLM_PROVIDER,
         "llm_configured": settings.is_llm_configured,
-        "local_model": settings.LOCAL_LLM_MODEL if settings.LLM_PROVIDER == "local" else None,
-        "qwen_configured": settings.is_qwen_configured,
+        "openai_configured": settings.is_openai_configured,
+        "openai_model": settings.OPENAI_MODEL if settings.is_openai_configured else None,
         "gemini_configured": settings.is_gemini_configured,
+        "qwen_configured": settings.is_qwen_configured,
         "nli_model": settings.NLI_MODEL,
         "embedding_model": settings.EMBEDDING_MODEL,
         "database": settings.DATABASE_URL.split("///")[-1],

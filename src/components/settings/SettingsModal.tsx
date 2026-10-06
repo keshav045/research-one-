@@ -165,7 +165,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, s
               <Cpu className="w-3.5 h-3.5" /> LLM Provider
             </p>
             <div className="grid grid-cols-2 gap-2">
-              {(['Gemini', 'OpenAI'] as const).map(prov => {
+              {(['OpenAI', 'Gemini'] as const).map(prov => {
                 const isSelected = formData.llmProvider === prov;
                 return (
                   <button
@@ -179,7 +179,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, s
                     <div>
                       <div className="font-semibold text-xs sm:text-sm">{prov}</div>
                       <div className="text-[10px] opacity-70 font-mono">
-                        {prov === 'Gemini' ? 'Gemini 2.0 / 3.5 Flash' : 'GPT-4o'}
+                        {prov === 'OpenAI' ? 'GPT-4o / GPT-4o-mini' : 'Gemini 2.0 Flash'}
                       </div>
                     </div>
                     {isSelected && <Check className="w-4 h-4" />}

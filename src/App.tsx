@@ -62,9 +62,9 @@ export const App: React.FC = () => {
   const SETTINGS_STORAGE_KEY = 'researchlens_app_settings';
 
   const DEFAULT_SETTINGS: AppSettings = {
-    llmProvider: 'Gemini',
+    llmProvider: 'OpenAI',
+    openaiModel: 'gpt-4o-mini',
     geminiModel: 'gemini-2.0-flash',
-    openaiModel: 'gpt-4o',
     maxPapers: 12,
     researchDepth: 'Standard',
     maxIterations: 3,

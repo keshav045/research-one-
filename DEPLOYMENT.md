@@ -27,42 +27,43 @@ This guide walks you through deploying **ResearchLens** with the **FastAPI backe
 2. Log into [Render Dashboard](https://dashboard.render.com).
 3. Click **New +** $\rightarrow$ **Blueprint**.
 4. Connect your repository. Render will automatically detect [`render.yaml`](./render.yaml).
-5. Fill in the required environment variables:
-   - `GEMINI_API_KEY`: Your Google Gemini API key (recommended for cloud inference)
-   - `SEMANTIC_SCHOLAR_API_KEY` (Optional): Semantic Scholar API key
-   - `OPENALEX_API_KEY` (Optional): OpenAlex API key
-6. Click **Apply**. Render will build and deploy the service.
-
-### Option B: Manual Web Service Setup
-If creating manually:
-1. In Render Dashboard, click **New +** $\rightarrow$ **Web Service**.
-2. Connect your Git repository.
-3. Configure the following settings:
-   - **Name**: `researchlens-backend`
-   - **Language**: `Python 3`
-   - **Region**: Any (e.g. `Oregon (US West)` or `Frankfurt (EU)`)
-   - **Branch**: `main` (or your active branch)
-   - **Root Directory**: *(Leave empty / root)*
-   - **Build Command**:
-     ```bash
-     pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && pip install --no-cache-dir -r backend/requirements.txt
-     ```
-     *(Note: Using the PyTorch CPU index avoids downloading the ~2.5GB CUDA packages, keeping the build fast and within standard disk limits)*
-   - **Start Command**:
-     ```bash
-     uvicorn backend.main:app --host 0.0.0.0 --port $PORT
-     ```
-   - **Plan**: `Starter` (or `Standard` recommended for NLI DeBERTa model memory; `Free` has a 512MB RAM cap).
-
-4. Add **Environment Variables** in the Render settings:
-   | Key | Value | Description |
-   | :--- | :--- | :--- |
-   | `PYTHON_VERSION` | `3.11.9` | Python runtime version |
-   | `HOST` | `0.0.0.0` | Bind address |
-   | `LLM_PROVIDER` | `gemini` | Cloud LLM provider (`gemini` or `qwen`) |
-   | `GEMINI_API_KEY` | `AIzaSy...` | Your Gemini API Key from Google AI Studio |
-   | `GEMINI_MODEL` | `gemini-2.0-flash` | Lightweight, fast cloud model |
-   | `NLI_DEVICE` | `cpu` | Uses CPU for DeBERTa inference |
+30: 5. Fill in the required environment variables:
+31:    - `OPENAI_API_KEY`: Your OpenAI API key (sk-...)
+32:    - `GEMINI_API_KEY` (Optional): Google Gemini API key
+33:    - `SEMANTIC_SCHOLAR_API_KEY` (Optional): Semantic Scholar API key
+34:    - `OPENALEX_API_KEY` (Optional): OpenAlex API key
+35: 6. Click **Apply**. Render will build and deploy the service.
+36: 
+37: ### Option B: Manual Web Service Setup
+38: If creating manually:
+39: 1. In Render Dashboard, click **New +** $\rightarrow$ **Web Service**.
+40: 2. Connect your Git repository.
+41: 3. Configure the following settings:
+42:    - **Name**: `researchlens-backend`
+43:    - **Language**: `Python 3`
+44:    - **Region**: Any (e.g. `Oregon (US West)` or `Frankfurt (EU)`)
+45:    - **Branch**: `main` (or your active branch)
+46:    - **Root Directory**: *(Leave empty / root)*
+47:    - **Build Command**:
+48:      ```bash
+49:      pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && pip install --no-cache-dir -r backend/requirements.txt
+50:      ```
+51:      *(Note: Using the PyTorch CPU index avoids downloading the ~2.5GB CUDA packages, keeping the build fast and within standard disk limits)*
+52:    - **Start Command**:
+53:      ```bash
+54:      uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+55:      ```
+56:    - **Plan**: `Starter` (or `Standard` recommended for NLI DeBERTa model memory; `Free` has a 512MB RAM cap).
+57: 
+58: 4. Add **Environment Variables** in the Render settings:
+59:    | Key | Value | Description |
+60:    | :--- | :--- | :--- |
+61:    | `PYTHON_VERSION` | `3.11.9` | Python runtime version |
+62:    | `HOST` | `0.0.0.0` | Bind address |
+63:    | `LLM_PROVIDER` | `openai` | Primary cloud LLM provider (`openai`, `gemini`, `qwen`) |
+64:    | `OPENAI_API_KEY` | `sk-...` | Your OpenAI API Key |
+65:    | `OPENAI_MODEL` | `gpt-4o-mini` | Fast, cost-effective OpenAI model |
+66:    | `NLI_DEVICE` | `cpu` | Uses CPU for DeBERTa inference |
    | `CORS_ORIGINS` | `*` | Or specify your Netlify domain |
    | `OPENALEX_EMAIL` | `your-email@example.com` | Polite pool identification |
    | `SEMANTIC_SCHOLAR_API_KEY` | *(Optional)* | Higher rate limits for S2 |

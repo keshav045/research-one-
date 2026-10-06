@@ -70,15 +70,10 @@ export const TopBar: React.FC<TopBarProps> = ({
               <Sparkles className="w-3 h-3 text-emerald-600" />
               <span>Static Demo</span>
             </>
-          ) : isCloud ? (
-            <>
-              <Globe className="w-3 h-3 text-emerald-600" />
-              <span>Cloud Engine</span>
-            </>
           ) : (
             <>
-              <Cpu className="w-3 h-3 text-emerald-600" />
-              <span>Local Engine</span>
+              <Globe className="w-3 h-3 text-emerald-600" />
+              <span>OpenAI Engine</span>
             </>
           )}
         </div>

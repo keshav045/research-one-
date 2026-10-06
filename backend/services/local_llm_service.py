@@ -107,15 +107,11 @@ async def _call_local(prompt: str, max_tokens: int = 512) -> str:
 
 
 _ollama_first_call = True
-_ollama_available: Optional[bool] = None
 
 
 async def _call_ollama(prompt: str, max_tokens: int = 512) -> str:
-    """Call Ollama REST API for LLM text generation with fast availability probe."""
-    global _ollama_first_call, _ollama_available
-    if _ollama_available is False:
-        return ""
-
+    """Call Ollama REST API for LLM text generation."""
+    global _ollama_first_call
     url = f"{settings.OLLAMA_URL}/api/generate"
     payload = {
         "model": settings.OLLAMA_MODEL,
@@ -127,53 +123,85 @@ async def _call_ollama(prompt: str, max_tokens: int = 512) -> str:
             "num_predict": max_tokens,
         },
     }
+    timeout = 180.0 if _ollama_first_call else 45.0
+    _ollama_first_call = False
+
     try:
-        # If first call, probe if Ollama server is responsive before long timeout
-        if _ollama_available is None:
-            async with httpx.AsyncClient(timeout=2.0) as probe_client:
-                try:
-                    probe_resp = await probe_client.get(f"{settings.OLLAMA_URL}/api/version")
-                    _ollama_available = (probe_resp.status_code == 200)
-                except Exception:
-                    _ollama_available = False
-                    logger.info("[Ollama] Offline or unreachable; falling back to secondary provider.")
-                    return ""
-
-        timeout = 180.0 if _ollama_first_call else 45.0
-        _ollama_first_call = False
-
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
             return data.get("response", "").strip()
     except Exception as exc:
-        if _ollama_available is None:
-            _ollama_available = False
         logger.warning("[Ollama] Request failed: %s", exc)
+        return ""
+
+
+async def _call_openai(prompt: str, max_tokens: int = 512) -> str:
+    """Call official OpenAI API for text generation."""
+    if not settings.is_openai_configured:
+        return ""
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        resp = await client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an academic synthesis system. "
+                        "Synthesize verified research findings into concise academic prose. "
+                        "CRITICAL: Keep bracketed citations [1], [2] attached to their claims. "
+                        "Do NOT invent new claims, numbers, or authors."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=max_tokens,
+            temperature=0.2,
+        )
+        return resp.choices[0].message.content.strip() if resp.choices else ""
+    except Exception as exc:
+        logger.warning("[OpenAI] Call failed: %s", exc)
         return ""
 
 
 def get_provider_model(provider: str) -> str:
     """Return model name associated with the provider."""
     prov = (provider or "").lower()
-    if "ollama" in prov:
-        return settings.OLLAMA_MODEL
-    elif "local" in prov:
-        return settings.LOCAL_LLM_MODEL
+    if "openai" in prov:
+        return settings.OPENAI_MODEL
     elif "gemini" in prov:
         return settings.GEMINI_MODEL
     elif "qwen" in prov:
         return settings.QWEN_MODEL
+    elif "ollama" in prov:
+        return settings.OLLAMA_MODEL
+    elif "local" in prov:
+        return settings.LOCAL_LLM_MODEL
     return "none"
 
 
 async def _call_llm(prompt: str, max_tokens: int = 512) -> tuple[str, str]:
-    """Unified LLM caller routing to Ollama, cloud, or local HF model.
+    """Unified LLM caller routing to OpenAI, Gemini, Qwen, Ollama, or fallback.
     Returns (text, provider_used).
     """
     provider = settings.LLM_PROVIDER.lower()
-    if provider == "ollama":
+
+    if provider == "openai":
+        res = await _call_openai(prompt, max_tokens)
+        if res:
+            return res, "openai"
+        if getattr(settings, "LLM_FALLBACK_LOCAL", False):
+            logger.warning("[LLM] OpenAI call failed. Falling back to local HF model (LLM_FALLBACK_LOCAL=True).")
+            res_local = await _call_local(prompt, max_tokens)
+            return res_local, "local (fallback)"
+        else:
+            logger.warning("[LLM] OpenAI call failed. Local fallback disabled (LLM_FALLBACK_LOCAL=False).")
+            return "", "none"
+
+    elif provider == "ollama":
         res = await _call_ollama(prompt, max_tokens)
         if res:
             return res, "ollama"
@@ -184,6 +212,7 @@ async def _call_llm(prompt: str, max_tokens: int = 512) -> tuple[str, str]:
         else:
             logger.warning("[LLM] Ollama call failed. Local fallback disabled (LLM_FALLBACK_LOCAL=False).")
             return "", "none"
+
     elif provider in ("qwen", "gemini"):
         try:
             from .gemini_service import generate_text_simple
@@ -199,10 +228,29 @@ async def _call_llm(prompt: str, max_tokens: int = 512) -> tuple[str, str]:
         else:
             logger.warning("[LLM] Cloud provider failed. Local fallback disabled (LLM_FALLBACK_LOCAL=False).")
             return "", "none"
+
     elif provider == "local":
-        res = await _call_local(prompt, max_tokens)
-        return res, "local"
+        if getattr(settings, "LLM_FALLBACK_LOCAL", False):
+            res = await _call_local(prompt, max_tokens)
+            return res, "local"
+        else:
+            logger.warning("[LLM] Local provider requested but local model disabled.")
+            return "", "none"
+
     else:
+        # Default chain if unknown provider: try OpenAI first if configured, else Gemini
+        if settings.is_openai_configured:
+            res = await _call_openai(prompt, max_tokens)
+            if res:
+                return res, "openai"
+        if settings.is_gemini_configured or settings.is_qwen_configured:
+            try:
+                from .gemini_service import generate_text_simple
+                res = await generate_text_simple(prompt, max_tokens)
+                if res:
+                    return res, "gemini" if settings.is_gemini_configured else "qwen"
+            except Exception:
+                pass
         return "", "none"
 
 

@@ -13,25 +13,27 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # LLM Provider: "ollama" (local Ollama server) | "local" (HF weights) | "qwen" | "gemini"
-    LLM_PROVIDER: str = "ollama"
+    # LLM Provider: "openai" (OpenAI API) | "gemini" | "qwen"
+    LLM_PROVIDER: str = "openai"
 
-    # Ollama (quantized local server — no API key required)
-    OLLAMA_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "qwen2.5:3b-instruct"
+    # OpenAI (Primary cloud LLM provider)
+    OPENAI_API_KEY: str = ""
+    OPENAI_MODEL: str = "gpt-4o-mini"
 
-    # Local LLM (HuggingFace — no API key required, heavy download)
-    LOCAL_LLM_MODEL: str = "Qwen/Qwen2.5-0.5B-Instruct"
-    LOCAL_LLM_MAX_TOKENS: int = 1536
-    LLM_FALLBACK_LOCAL: bool = True
+    # Gemini (secondary / alternative)
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.0-flash"
 
     # Qwen (Alibaba DashScope — OpenAI-compatible)
     QWEN_API_KEY: str = ""
     QWEN_MODEL: str = "qwen-plus"
 
-    # Gemini (fallback / alternative)
-    GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-2.0-flash"
+    # Local LLM Fallback (disabled — cloud LLM is active)
+    LOCAL_LLM_MODEL: str = "Qwen/Qwen2.5-0.5B-Instruct"
+    LOCAL_LLM_MAX_TOKENS: int = 1536
+    LLM_FALLBACK_LOCAL: bool = False
+    OLLAMA_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "qwen2.5:3b-instruct"
 
     # Semantic Scholar
     SEMANTIC_SCHOLAR_API_KEY: str = ""
@@ -96,6 +98,10 @@ class Settings(BaseSettings):
     MAX_PDF_SIZE_BYTES: int = 80 * 1024 * 1024  # 80 MB PDF size cap
 
     @property
+    def is_openai_configured(self) -> bool:
+        return bool(self.OPENAI_API_KEY) and self.OPENAI_API_KEY.strip() not in ("your_openai_api_key_here", "")
+
+    @property
     def is_ollama_configured(self) -> bool:
         return self.LLM_PROVIDER.lower() == "ollama"
 
@@ -109,17 +115,23 @@ class Settings(BaseSettings):
 
     @property
     def is_local_llm_configured(self) -> bool:
-        return True
+        return False
 
     @property
     def is_llm_configured(self) -> bool:
-        """True if any LLM provider is ready."""
+        """True if any cloud LLM provider is ready."""
         provider = self.LLM_PROVIDER.lower()
-        if provider == "ollama":
-            return True  # assumes ollama server is running
-        if provider == "local":
-            return True
-        return self.is_qwen_configured or self.is_gemini_configured
+        if provider == "openai":
+            return self.is_openai_configured
+        if provider == "gemini":
+            return self.is_gemini_configured
+        if provider == "qwen":
+            return self.is_qwen_configured
+        return (
+            self.is_openai_configured
+            or self.is_gemini_configured
+            or self.is_qwen_configured
+        )
 
 
 @lru_cache
