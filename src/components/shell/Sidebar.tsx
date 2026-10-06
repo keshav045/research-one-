@@ -205,7 +205,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <>
       {/* Desktop Sidebar: Only visible on md screens and up */}
       <aside
-        className={`hidden md:flex flex-col h-screen border-r border-gray-200 bg-white text-gray-800 transition-all duration-300 select-none z-30 shrink-0 ${
+        className={`hidden md:flex flex-col h-dvh border-r border-gray-200 bg-white text-gray-800 transition-all duration-300 select-none z-30 shrink-0 ${
           collapsed ? 'w-14' : 'w-60'
         }`}
       >

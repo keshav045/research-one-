@@ -209,6 +209,7 @@ export const App: React.FC = () => {
       setCurrentTab('workspace');
     } catch (err: any) {
       console.error('[StartResearch] Error:', err);
+      window.alert(err?.message || 'Could not start research. Please try again.');
     }
   };
 
@@ -294,7 +295,7 @@ export const App: React.FC = () => {
   const hasReport = Boolean(activeInvestigation?.report);
 
   return (
-    <div className="flex h-screen bg-white text-gray-900 overflow-hidden font-sans antialiased">
+    <div className="flex h-dvh bg-white text-gray-900 overflow-hidden font-sans antialiased">
       {/* 1. Left Navigation Sidebar (Desktop dock + Mobile off-canvas drawer) */}
       <Sidebar
         currentTab={currentTab}
@@ -317,7 +318,7 @@ export const App: React.FC = () => {
       />
 
       {/* 2. Main Content Canvas */}
-      <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
+      <div className="flex-1 flex flex-col min-w-0 h-dvh overflow-hidden">
         <TopBar
           investigation={activeInvestigation}
           evidencePanelOpen={evidencePanelOpen}

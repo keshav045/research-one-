@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional, List, Tuple
+import uuid
+from typing import Any, Optional, List, Tuple
 
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification

@@ -11,12 +11,17 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
       - SEMANTIC_SCHOLAR_API_KEY=${SEMANTIC_SCHOLAR_API_KEY:-}
       - DATABASE_URL=${DATABASE_URL:-sqlite:///./data/researchlens.db}
       - NLI_MODEL=${NLI_MODEL:-cross-encoder/nli-deberta-v3-small}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
+      - NLI_DEVICE=${NLI_DEVICE:-cpu}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:80}
       - PDF_CACHE_DIR=/app/data/pdf_cache
       - HOST=0.0.0.0
       - PORT=8000
@@ -36,7 +41,6 @@ services:
       dockerfile: Dockerfile.frontend
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
-        VITE_GEMINI_API_KEY: ${VITE_GEMINI_API_KEY:-}
     container_name: researchlens-frontend
     restart: unless-stopped
     ports:

@@ -309,6 +309,7 @@ async def resolve_paper_pdf_urls(paper: Paper) -> list[str]:
     # Cascade Step 3: Look up through OpenAlex
     if not arxiv_id and paper.title:
         try:
+            norm_target = _normalize_title_for_lookup(paper.title)
             openalex_key = getattr(settings, "OPENALEX_API_KEY", "").strip()
             headers = {}
             if openalex_key:

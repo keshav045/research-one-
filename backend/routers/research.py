@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..models.database import ResearchJob, PaperRecord, get_db
 from ..models.schemas import (
     Paper,
@@ -45,9 +47,9 @@ async def start_research(
         id=job_id,
         question=req.question,
         depth=req.depth.value,
-        sources=str([s.value for s in req.sources]).replace("'", '"'),
+        sources=json.dumps([s.value for s in req.sources]),
         status="in_progress",
-        total_papers={"Quick": 6, "Standard": 8, "Deep": 12}.get(req.depth.value, 8),
+        total_papers=settings.DEPTH_COUNTS.get(req.depth.value, 12),
         created_at=now,
         updated_at=now,
     )
@@ -91,7 +93,7 @@ async def get_research(
 
 @router.get("", response_model=list[ResearchInvestigation])
 async def list_research(
-    limit: int = 20,
+    limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
 ) -> list[ResearchInvestigation]:
     jobs = (

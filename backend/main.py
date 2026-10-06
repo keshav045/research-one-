@@ -74,6 +74,23 @@ async def lifespan(app: FastAPI):
     create_tables()
     logger.info("Database tables ready")
 
+    # Jobs left in_progress by a previous process can never finish; mark them failed.
+    try:
+        from .models.database import SessionLocal, ResearchJob
+        _db = SessionLocal()
+        try:
+            stale = _db.query(ResearchJob).filter(ResearchJob.status == "in_progress").all()
+            for _j in stale:
+                _j.status = "failed"
+                _j.failure_reason = "Server restarted while this job was running. Please retry."
+            _db.commit()
+            if stale:
+                logger.warning("Marked %d stale in_progress job(s) as failed", len(stale))
+        finally:
+            _db.close()
+    except Exception as exc:
+        logger.warning("Stale job cleanup failed: %s", exc)
+
     # Ensure PDF cache directory exists
     Path(settings.PDF_CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
@@ -158,11 +175,12 @@ if _cors_origins_env:
         if _cleaned and _cleaned not in _allowed_origins:
             _allowed_origins.append(_cleaned)
 
+_has_wildcard = "*" in _allowed_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins if "*" not in _allowed_origins else ["*"],
-    allow_origin_regex=r"https://.*\.netlify\.app",
-    allow_credentials=True,
+    allow_origins=_allowed_origins if not _has_wildcard else ["*"],
+    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX") or r"https://.*\.netlify\.app",
+    allow_credentials=not _has_wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
 )

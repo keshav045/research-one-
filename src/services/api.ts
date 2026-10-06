@@ -103,9 +103,10 @@ export async function startResearch(params: {
 
     return (await res.json()) as ResearchInvestigation;
   } catch (err: any) {
-    console.warn('[API] Backend unreachable, falling back to static interactive demo mode:', err);
-    // Graceful automatic static demo fallback so mobile users never see a broken experience
-    return mockService.startMockResearch(params);
+    // Surface failure clearly instead of substituting canned demo data for a real question
+    throw new Error(
+      `Could not reach the research backend (${err?.message || 'network error'}). It may be waking up — please retry in a moment, or switch to Demo mode in Settings.`
+    );
   }
 }
 

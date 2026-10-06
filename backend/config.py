@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     SEMANTIC_SCHOLAR_API_KEY: str = ""
 
     # OpenAlex Polite Pool & API Key
-    OPENALEX_EMAIL: str = "researchlens.tool@gmail.com"
+    OPENALEX_EMAIL: str = "rohitkumar700as@gmail.com"
     OPENALEX_API_KEY: str = ""
     OPENALEX_FIELD_FILTER: str = "topics.field.id:17"
 
