@@ -297,7 +297,34 @@ def extract_and_verify_evidence(
         for rec, sc in sub_passages:
             passage_text = clean_hyphenated_breaks(rec.passage.text)
             sentences = _filter_and_extract_sentences(passage_text, removal_counts)
+            rec_paper = paper_map.get(rec.paper_id)
+            rec_authors_lower = " ".join(rec_paper.authors).lower() if (rec_paper and rec_paper.authors) else ""
+
             for sent in sentences[:3]:
+                # Author attribution alignment check:
+                # Detect if the sentence explicitly attributes work to an external author (e.g. "Lewis et al.", "Gao et al.")
+                ext_author_matches = re.findall(r"\b([A-Z][a-zA-Z\-]+)\s+(?:et\s+al\.?|\(\d{4}\))", sent)
+                target_rec = rec
+                if ext_author_matches and rec_paper:
+                    # Check if the named author is an author of THIS paper
+                    if not any(a.lower() in rec_authors_lower for a in ext_author_matches):
+                        # Sentence is citing an external author! Check if that external author has a paper in our candidate papers
+                        matched_other_rec = None
+                        for other_rec, _ in sub_passages:
+                            other_p = paper_map.get(other_rec.paper_id)
+                            if other_p and other_p.id != rec_paper.id and other_p.authors:
+                                other_auth_str = " ".join(other_p.authors).lower()
+                                if any(a.lower() in other_auth_str for a in ext_author_matches):
+                                    matched_other_rec = other_rec
+                                    break
+                        if matched_other_rec is not None:
+                            # Re-attribute claim to the actual author's paper
+                            target_rec = matched_other_rec
+                        else:
+                            # Do not falsely attribute an external author's finding to this paper
+                            # (prevents e.g. "Lewis et al. [1]" pointing to Gao's survey)
+                            continue
+
                 claim_norm = re.sub(r"[^a-z0-9]", "", sent.lower())
                 pair_key = f"{sub_q}::{claim_norm}"
                 if pair_key in seen_subq_claim_norms:
@@ -306,7 +333,7 @@ def extract_and_verify_evidence(
                 candidate_claims.append({
                     "sub_q": sub_q,
                     "sentence": sent,
-                    "record": rec,
+                    "record": target_rec,
                     "passage_text": passage_text,
                     "passage_score": sc,
                 })

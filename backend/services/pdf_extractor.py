@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
 from collections import Counter
 from pathlib import Path
@@ -235,6 +236,25 @@ def _extract_passages_from_pdf_bytes(paper_id: str, pdf_bytes: bytes) -> list[Pa
                     )
                 )
                 passage_seq += 1
+
+        # Cap passages per paper to prevent excessive memory/indexing bloat in constrained (2.7GB) environments
+        max_passages = getattr(settings, "MAX_PASSAGES_PER_PAPER", 25)
+        if max_passages > 0 and len(passages) > max_passages:
+            _info_re = re.compile(
+                r"\b(?:propos|achiev|reduc|increas|improv|outperform|introduc|demonstrat|evaluat|model|architect|attent|layer|param|loss|accurac|speed|latenc|throughput|effici|memor|weight|dataset|benchmark)\b",
+                re.IGNORECASE,
+            )
+            def _passage_value(p: PaperPassage) -> float:
+                sec = (p.section or "").lower()
+                sec_weight = 2.0 if any(k in sec for k in ("abstract", "intro", "method", "model", "architect", "evaluat", "result", "conclus")) else 1.0
+                kw_count = len(_info_re.findall(p.text))
+                return sec_weight * (kw_count + 1.0) / math.sqrt(max(1, p.page))
+
+            passages.sort(key=_passage_value, reverse=True)
+            passages = passages[:max_passages]
+            passages.sort(key=lambda p: (p.page, p.id))
+            for idx, p in enumerate(passages):
+                p.embedding_idx = idx
 
         return passages
 

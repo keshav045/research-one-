@@ -353,7 +353,8 @@ async def generate_plain_answer(
         "Strict Requirements:\n"
         "1. Use ONLY the given verified source facts. Add NO new facts, dates, names, or unverified claims.\n"
         "2. Preserve the bracketed citation markers [n] directly adjacent to each asserted fact.\n"
-        "3. Output PLAIN TEXT ONLY. Do not output markdown titles, lists, or JSON."
+        "3. Output PLAIN TEXT ONLY. Do not output markdown titles, lists, or JSON.\n"
+        "4. Author Consistency: When referring to authors by name in prose (e.g. 'Vaswani et al.', 'Lewis et al.'), ensure the named authors match the specific paper cited by [n]. NEVER attribute findings to authors different from the authors listed in the source metadata for that [n]."
     )
 
     provider_used = "none"
@@ -599,6 +600,28 @@ async def synthesize_report(
         return ""
 
     verified_answer = re.sub(r"\[(\d+)\]", _validate_ref, verified_answer)
+
+    # Author-reference alignment: ensure named authors in prose match the cited reference paper
+    def _align_author_citations(sentence: str) -> str:
+        author_m = re.findall(r"\b([A-Z][a-zA-Z\-]+)\s+et\s+al\.?", sentence)
+        cite_m = [int(n) for n in re.findall(r"\[(\d+)\]", sentence)]
+        if author_m and cite_m:
+            for auth in author_m:
+                for c_num in cite_m:
+                    if 1 <= c_num <= ref_count:
+                        ref_paper = references[c_num - 1]
+                        ref_auths = " ".join(getattr(ref_paper, "authors", []) or []).lower()
+                        if auth.lower() not in ref_auths:
+                            actual_ref_idx = next(
+                                (idx + 1 for idx, p in enumerate(references) if auth.lower() in " ".join(getattr(p, "authors", []) or []).lower()),
+                                None
+                            )
+                            if actual_ref_idx:
+                                sentence = sentence.replace(f"[{c_num}]", f"[{actual_ref_idx}]")
+        return sentence
+
+    sents_aligned = [_align_author_citations(s) for s in split_into_sentences(verified_answer)]
+    verified_answer = " ".join(sents_aligned)
     verified_answer = collapse_repeated_citations(verified_answer)
     verified_answer = re.sub(r"\s+([.,;:!?])", r"\1", verified_answer)
     verified_answer = re.sub(r"\s+", " ", verified_answer).strip()

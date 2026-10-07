@@ -144,6 +144,8 @@ def _evaluate_batch_pairs(pairs: List[Tuple[str, str]]) -> List[Tuple[Entailment
 
             results.append((verdict, round(confidence, 3), reasoning))
 
+    import gc
+    gc.collect()
     return results
 
 

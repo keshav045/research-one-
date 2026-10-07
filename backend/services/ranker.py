@@ -896,6 +896,9 @@ def rank_papers(
             a_lower = (p.abstract or "").lower()
             overlap = sum(1 for w in q_tokens if w in t_lower) * 3.0 + sum(1 for w in q_tokens if w in a_lower) * 0.5
             cites = max(0, getattr(p, "citationCount", 0) or 0)
+            if overlap == 0:
+                # Citations alone cannot promote a paper that has ZERO relevant question words (e.g. Data clustering 1999)
+                return 0.0
             return overlap + math.log1p(cites)
 
         cleaned.sort(key=_pre_rank_score, reverse=True)
@@ -1049,6 +1052,13 @@ def rank_papers(
             final_ranked.append(matched_anchor)
             seen_pids.add(matched_anchor.id)
 
+        # Title guess match (e.g. "Attention Is All You Need") ranks at or near the top
+        for p in ranked_pool:
+            if _normalize_title(p.title) in title_guess_normalized:
+                if p.id not in seen_pids:
+                    final_ranked.append(p)
+                    seen_pids.add(p.id)
+
         # Top 3 key-term candidates by citationCount
         key_terms = extract_key_terms(question) if question else []
         key_term_cands: list[Paper] = []
@@ -1083,14 +1093,26 @@ def rank_papers(
             ranked = relevant_pool[:target_count]
         else:
             # Backfill from ranked_pool so candidate papers are not starved when few pass strict cutoff
+            q_tokens_set = {w for w in re.sub(r"[^\w\s]", "", question.lower()).split() if len(w) > 3}
             ranked = list(relevant_pool)
             seen_ids = {p.id for p in ranked}
             for p in ranked_pool:
                 if len(ranked) >= target_count:
                     break
                 if p.id not in seen_ids:
+                    # Enforce relevance floor: never backfill manifestly irrelevant / off-topic papers
+                    # (e.g. Data clustering 1999 with 0 question keyword overlap in a RAG query)
+                    paper_text = (p.title + " " + (p.abstract or "")).lower()
+                    has_q_overlap = any(w in paper_text for w in q_tokens_set) if q_tokens_set else True
+                    if getattr(p, "relevance_score", 0.0) < 0.20 and not has_q_overlap:
+                        continue
                     ranked.append(p)
                     seen_ids.add(p.id)
+
+            # If still empty after backfill, safely use top candidates from pool
+            if not ranked:
+                ranked = list(ranked_pool[:target_count])
+
             if relevant_pool:
                 logger.info(
                     "[Ranker] Only %d candidate paper(s) met strict threshold (%.2f); backfilled up to %d papers from pool.",

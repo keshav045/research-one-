@@ -184,6 +184,8 @@ class VectorStore:
             "embedding_seconds=%.3fs, faiss_add_seconds=%.3fs",
             len(papers), len(texts), mean_tokens, p95_tokens, embed_sec, faiss_add_sec
         )
+        import gc
+        gc.collect()
 
     def search_paper(
         self,
