@@ -82,13 +82,13 @@ class Settings(BaseSettings):
     NLI_ENTAIL_THRESHOLD: float = 0.80
 
     # Embedding & Vector Indexing Optimizations
-    TORCH_NUM_THREADS: int = 2
+    TORCH_NUM_THREADS: int = 4
     EMBED_MAX_LENGTH: int = 128
     SKIP_NONBODY_SECTIONS: bool = True
-    MAX_PASSAGES_PER_PAPER: int = 0
+    MAX_PASSAGES_PER_PAPER: int = 25
     EMBED_CACHE_ENABLED: bool = True
     EMBED_QUANTIZE: bool = False
-    EMBEDDING_BACKEND: str = "local"  # "local" | "openai"
+    EMBEDDING_BACKEND: str = "auto"  # "auto" | "openai" | "local"
     RELEVANCE_THRESHOLD: float = 0.30
     ANCHOR_MIN_CITATIONS: int = 1000
     ANCHOR_WEIGHT_REF: float = 0.5
@@ -110,7 +110,7 @@ class Settings(BaseSettings):
 
     # File system
     PDF_CACHE_DIR: str = "./pdf_cache"
-    MAX_PDF_WORKERS: int = 4
+    MAX_PDF_WORKERS: int = 6
     MAX_PDF_SIZE_BYTES: int = 80 * 1024 * 1024  # 80 MB PDF size cap
 
     @property

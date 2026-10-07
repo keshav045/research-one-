@@ -26,7 +26,9 @@ from backend.services.vector_store import VectorStore
 def test_order_restoration_after_length_sorting():
     """Verify that length-sorting in embed_texts restores exact input order."""
     orig_cache = settings.EMBED_CACHE_ENABLED
+    orig_backend = settings.EMBEDDING_BACKEND
     settings.EMBED_CACHE_ENABLED = False
+    settings.EMBEDDING_BACKEND = "local"
     try:
         texts = [
             "A short sentence.",
@@ -49,12 +51,15 @@ def test_order_restoration_after_length_sorting():
             assert cos_sim > 0.999, f"Order mismatch at index {i}: cos_sim={cos_sim}"
     finally:
         settings.EMBED_CACHE_ENABLED = orig_cache
+        settings.EMBEDDING_BACKEND = orig_backend
 
 
 def test_cache_hit_miss_correctness():
     """Verify SQLite disk cache records misses, saves them, and returns hits on subsequent calls."""
     orig_cache = settings.EMBED_CACHE_ENABLED
+    orig_backend = settings.EMBEDDING_BACKEND
     settings.EMBED_CACHE_ENABLED = True
+    settings.EMBEDDING_BACKEND = "local"
     clear_disk_cache()
     try:
         texts1 = ["Passage alpha for testing disk cache.", "Passage beta for testing disk cache."]
@@ -87,6 +92,7 @@ def test_cache_hit_miss_correctness():
     finally:
         clear_disk_cache()
         settings.EMBED_CACHE_ENABLED = orig_cache
+        settings.EMBEDDING_BACKEND = orig_backend
 
 
 def test_skipping_nonbody_sections():

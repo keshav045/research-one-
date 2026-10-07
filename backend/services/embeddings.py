@@ -269,19 +269,14 @@ def embed_texts(
     if not texts:
         return np.empty((0, 384), dtype=np.float32)
 
-    # 1. Check OpenAI backend if configured
-    if getattr(settings, "EMBEDDING_BACKEND", "local").lower() == "openai":
-        openai_embs = _embed_openai(texts)
-        if openai_embs is not None:
-            return openai_embs
-
     effective_max_length = (
         max_length if max_length is not None else getattr(settings, "EMBED_MAX_LENGTH", 128)
     )
-    tokenizer, model = get_model()
-    model_name = _active_model_name or settings.EMBEDDING_MODEL
+    backend_mode = getattr(settings, "EMBEDDING_BACKEND", "local").lower()
+    use_openai = backend_mode in ("openai", "auto") and settings.is_openai_configured
+    model_name = "text-embedding-3-small" if use_openai else (_active_model_name or settings.EMBEDDING_MODEL)
 
-    # 2. Check disk cache
+    # 1. Check disk cache first (applies to both OpenAI and local)
     cache_keys = [_compute_cache_key(model_name, effective_max_length, t) for t in texts]
     cached_map = _lookup_disk_cache(cache_keys)
 
@@ -292,6 +287,36 @@ def embed_texts(
         return np.vstack([cached_map[k] for k in cache_keys])
 
     uncached_texts = [texts[idx] for idx in miss_indices]
+
+    # 2. Try OpenAI backend if active
+    if use_openai:
+        uncached_embs = _embed_openai(uncached_texts)
+        if uncached_embs is not None:
+            new_cache_entries = [
+                (cache_keys[orig_idx], uncached_embs[i])
+                for i, orig_idx in enumerate(miss_indices)
+            ]
+            _save_disk_cache(new_cache_entries)
+
+            final_embeddings = np.empty((len(texts), uncached_embs.shape[1]), dtype=np.float32)
+            for i, k in enumerate(cache_keys):
+                if k in cached_map:
+                    final_embeddings[i] = cached_map[k]
+            for i, orig_idx in enumerate(miss_indices):
+                final_embeddings[orig_idx] = uncached_embs[i]
+            return final_embeddings
+
+        # If OpenAI fails, fall back to local model
+        logger.warning("[Embeddings] OpenAI embedding call returned None; falling back to local BGE model.")
+        model_name = _active_model_name or settings.EMBEDDING_MODEL
+        cache_keys = [_compute_cache_key(model_name, effective_max_length, t) for t in texts]
+        cached_map = _lookup_disk_cache(cache_keys)
+        miss_indices = [idx for idx, k in enumerate(cache_keys) if k not in cached_map]
+        if not miss_indices:
+            return np.vstack([cached_map[k] for k in cache_keys])
+        uncached_texts = [texts[idx] for idx in miss_indices]
+
+    tokenizer, model = get_model()
 
     # 3. Sort uncached texts by length to minimize padding waste
     sort_order = sorted(range(len(uncached_texts)), key=lambda i: len(uncached_texts[i]))
