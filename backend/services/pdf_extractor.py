@@ -40,13 +40,26 @@ def _cache_path(url: str) -> Path:
 import time
 
 _last_arxiv_download_time: float = 0.0
-_arxiv_download_lock = asyncio.Lock()
+_arxiv_download_lock_inst: Optional[asyncio.Lock] = None
+_arxiv_download_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _get_arxiv_download_lock() -> asyncio.Lock:
+    global _arxiv_download_lock_inst, _arxiv_download_loop
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if _arxiv_download_lock_inst is None or _arxiv_download_loop != loop:
+        _arxiv_download_lock_inst = asyncio.Lock()
+        _arxiv_download_loop = loop
+    return _arxiv_download_lock_inst
 
 
 async def _throttle_arxiv_download():
     """Ensure at least 3.0 seconds between arXiv requests."""
     global _last_arxiv_download_time
-    async with _arxiv_download_lock:
+    async with _get_arxiv_download_lock():
         now = time.time()
         elapsed = now - _last_arxiv_download_time
         if elapsed < 3.0:

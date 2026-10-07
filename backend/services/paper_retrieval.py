@@ -209,20 +209,52 @@ def _set_cached_response(source: str, query: str, data: list[dict]) -> None:
 
 # ─── Global Locks & Error Tracking ────────────────────────────────────────────
 
-_arxiv_lock = asyncio.Lock()
+_arxiv_lock_inst: Optional[asyncio.Lock] = None
+_arxiv_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _get_arxiv_lock() -> asyncio.Lock:
+    global _arxiv_lock_inst, _arxiv_lock_loop
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if _arxiv_lock_inst is None or _arxiv_lock_loop != loop:
+        _arxiv_lock_inst = asyncio.Lock()
+        _arxiv_lock_loop = loop
+    return _arxiv_lock_inst
+
+
 class S2RateLimiter:
     """
     Process-wide mutual-exclusion rate limiter for Semantic Scholar:
     - Exactly ONE S2 call executing at any instant across the entire process.
     - >= 1.25s spacing (with API key) or >= 3.0s (unauthenticated) from the end of the previous call.
     - Honors Retry-After headers by shifting the next available window.
+    - Lazy per-event-loop lock ensures thread and multi-loop safety.
     """
     def __init__(self):
-        self._lock = asyncio.Lock()
+        self._lock_inst: Optional[asyncio.Lock] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._last_call_end = 0.0
 
+    def _get_lock(self) -> asyncio.Lock:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if self._lock_inst is None or self._loop != loop:
+            self._lock_inst = asyncio.Lock()
+            self._loop = loop
+        return self._lock_inst
+
+    @property
+    def _lock(self) -> asyncio.Lock:
+        return self._get_lock()
+
     async def __aenter__(self):
-        await self._lock.acquire()
+        lock = self._get_lock()
+        await lock.acquire()
         is_authenticated = bool(settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
         min_interval = 1.25 if is_authenticated else 3.0
         now = time.time()
@@ -241,12 +273,11 @@ class S2RateLimiter:
         if self._last_call_end <= now:
             self._last_call_end = now
         try:
-            self._lock.release()
+            self._get_lock().release()
         except RuntimeError:
             pass
 
 _s2_limiter = S2RateLimiter()
-_s2_lock = _s2_limiter._lock  # Backward compatibility alias
 _last_arxiv_call_time = 0.0
 _retrieval_errors: list[str] = []
 _s2_call_records: list[dict] = []
@@ -390,11 +421,12 @@ def _format_arxiv_query_expr(phrase: str) -> str:
 async def _throttle_arxiv():
     """Ensure at least 3 seconds between successive arXiv API requests."""
     global _last_arxiv_call_time
-    now = time.time()
-    elapsed = now - _last_arxiv_call_time
-    if elapsed < 3.0:
-        await asyncio.sleep(3.0 - elapsed)
-    _last_arxiv_call_time = time.time()
+    async with _get_arxiv_lock():
+        now = time.time()
+        elapsed = now - _last_arxiv_call_time
+        if elapsed < 3.0:
+            await asyncio.sleep(3.0 - elapsed)
+        _last_arxiv_call_time = time.time()
 
 
 async def _throttle_s2():
