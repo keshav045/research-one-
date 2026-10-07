@@ -8,6 +8,8 @@ import asyncio
 import os
 import sys
 import json
+import time
+import tracemalloc
 
 # Ensure project root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -30,15 +32,20 @@ async def main():
     job = ResearchJob(
         id=job_id,
         question=q,
-        depth="Quick",
+        depth="Standard",
         sources='["arXiv", "Semantic Scholar", "OpenAlex"]',
         status="in_progress",
     )
     db.add(job)
     db.commit()
 
-    print(f"=== Starting Benchmark Pipeline for: '{q}' ===")
+    print(f"=== Starting Benchmark Pipeline for: '{q}' (Depth: Standard) ===")
+    tracemalloc.start()
+    t_start = time.perf_counter()
     await run_research_pipeline(job_id, db)
+    t_total = time.perf_counter() - t_start
+    current_mem, peak_mem = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
 
     db.refresh(job)
     inv = job_to_investigation(job)
@@ -62,6 +69,13 @@ async def main():
     print(f"- research depth:           {inv.research_depth}%")
     print(f"- research confidence:      {inv.research_confidence}")
     print(f"- source failures / status: {json.dumps(inv.source_status or {}, indent=2)}")
+    print(f"- total pipeline seconds:   {t_total:.2f}s")
+    print(f"- peak memory:              {peak_mem / (1024 * 1024):.2f} MB")
+
+    print(f"\n--- STAGE STATS / TIMINGS ---")
+    if inv.stage_stats:
+        for s in inv.stage_stats:
+            print(f"  {s.name:<30} {s.duration_ms / 1000.0:>8.2f}s (in={s.in_count}, out={s.out_count})")
 
     print(f"\n--- CONCEPT COVERAGE ---")
     if inv.concept_coverage:

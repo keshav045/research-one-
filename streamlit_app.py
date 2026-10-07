@@ -89,15 +89,17 @@ else:
 _db_file = os.getenv("STREAMLIT_DB_PATH", str(_PROJECT_ROOT / "researchlens_st.db"))
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{Path(_db_file).resolve()}")
 
-# Enforce 1 PyTorch thread for low-resource environments
-try:
-    import torch
-    torch.set_num_threads(1)
-except Exception:
-    pass
-
 # ── 3. Import Backend Configuration & Database ────────────────────────────────
 from backend.config import settings
+
+# Configure PyTorch threads: use os.cpu_count() capped at 2 on Streamlit Cloud, or settings.TORCH_NUM_THREADS
+try:
+    import torch
+    _is_cloud = bool(os.getenv("STREAMLIT_SHARING_MODE") or os.getenv("HOSTNAME", "").startswith("streamlit"))
+    _threads = min(os.cpu_count() or 1, 2) if _is_cloud else getattr(settings, "TORCH_NUM_THREADS", 2)
+    torch.set_num_threads(max(1, _threads))
+except Exception:
+    pass
 from backend.models.database import PaperRecord, ResearchJob, SessionLocal, create_tables
 from backend.models.schemas import (
     Citation,
@@ -498,6 +500,34 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# ── Authentication Gate (Production Security) ─────────────────────────────────
+# When STREAMLIT_PASSWORD or APP_PASSWORD is set in st.secrets or environment,
+# require password verification before exposing investigation interface.
+_app_password = os.getenv("STREAMLIT_PASSWORD") or os.getenv("APP_PASSWORD")
+try:
+    if not _app_password and hasattr(st, "secrets") and "STREAMLIT_PASSWORD" in st.secrets:
+        _app_password = str(st.secrets["STREAMLIT_PASSWORD"])
+except Exception:
+    pass
+
+if _app_password and _app_password.strip():
+    import secrets as _secrets
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+
+    if not st.session_state["authenticated"]:
+        st.title("ResearchLens Access Control")
+        st.markdown("Please enter the security access token or password to enter the research workspace.")
+        pwd_input = st.text_input("Access Password", type="password", key="auth_password_input")
+        if st.button("Authenticate", type="primary"):
+            if _secrets.compare_digest(pwd_input.strip(), _app_password.strip()):
+                st.session_state["authenticated"] = True
+                st.success("Authentication successful.")
+                st.rerun()
+            else:
+                st.error("Invalid password. Access denied.")
+        st.stop()
 
 # ── Sidebar Controls ──────────────────────────────────────────────────────────
 with st.sidebar:

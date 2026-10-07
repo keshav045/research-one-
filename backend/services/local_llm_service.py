@@ -326,24 +326,14 @@ async def generate_plain_answer(
     if q_type != "factual_lookup" and n_papers <= 1:
         first_c = verified_citations[0]
         ref_num = ref_index.get(first_c.paperId, 1) if ref_index else 1
-        claims_text = " ".join(c.claim.lower() for c in verified_citations)
-        titles_text = " ".join(c.paperTitle.lower() for c in verified_citations)
-        if "pagedattention" in claims_text or "pagedattention" in titles_text:
-            honest_answer = (
-                f"Research coverage is insufficient to answer this question in general. "
-                f"Only {n_papers} relevant paper(s) with usable evidence were retrieved. "
-                f"PagedAttention provides verified evidence for memory-efficient LLM serving [{ref_num}]. "
-                f"Insufficient verified evidence was available to compare it against alternative techniques."
-            )
-            return honest_answer, "honest_reporting_system", "none"
-        else:
-            honest_answer = (
-                f"Research coverage is insufficient to answer this question in general. "
-                f"Only {n_papers} relevant paper(s) with usable evidence were retrieved. "
-                f"'{first_c.paperTitle}' provides verified evidence [{ref_num}]. "
-                f"Insufficient verified evidence was available to comprehensively address all facets of the inquiry."
-            )
-            return honest_answer, "honest_reporting_system", "none"
+        claim_text = first_c.claim.strip().rstrip(".")
+        honest_answer = (
+            f"Research coverage is insufficient to answer this question in general. "
+            f"Only {n_papers} relevant paper(s) with usable evidence were retrieved. "
+            f"{claim_text} [{ref_num}]. "
+            f"Insufficient verified evidence was available to compare it against alternative techniques or comprehensively address all facets of the inquiry."
+        )
+        return honest_answer, "honest_reporting_system", "none"
 
     # Format claims with strictly verified metadata and reference numbers
     claims_context = []
@@ -691,6 +681,9 @@ async def synthesize_report(
         else:
             concept_coverage_map[f] = "INSUFFICIENT"
             insufficient_evidence_items.append(f"{f}: Insufficient verified empirical evidence retrieved in current session.")
+
+    if writer_provider == "honest_reporting_system":
+        tech_comparison = []
 
     if unmatched_citations:
         seen_claims = set()

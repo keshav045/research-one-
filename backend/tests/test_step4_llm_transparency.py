@@ -131,18 +131,43 @@ async def test_synthesize_report_records_writer_info_and_fallback_warnings():
         highlightSentence="We propose the Transformer.",
     )
 
+    paper2 = Paper(
+        id="paper-2",
+        title="BERT: Pre-training of Deep Bidirectional Transformers",
+        authors=["Jacob Devlin", "Ming-Wei Chang"],
+        publicationYear=2018,
+        journalConference="NAACL",
+        doi="",
+        source="arxiv",
+        abstract="We introduce a new language representation model called BERT.",
+        citationCount=80000,
+    )
+    citation2 = Citation(
+        id="c-2",
+        badgeNumber=2,
+        claim="BERT is designed to pretrain deep bidirectional representations from unlabeled text.",
+        status=CitationStatus.VERIFIED,
+        paperId="paper-2",
+        paperTitle="BERT: Pre-training of Deep Bidirectional Transformers",
+        authors="Devlin et al.",
+        year=2018,
+        page=1,
+        passage="We introduce a new language representation model called BERT.",
+        highlightSentence="We introduce BERT.",
+    )
+
     debug_info = {}
 
     with patch("backend.services.local_llm_service._call_llm", AsyncMock(return_value=(
-        "The Transformer architecture replaces recurrent neural networks with multi-head self-attention mechanisms [1]. This enables significantly more parallelization during training [1].",
+        "The Transformer architecture replaces recurrent neural networks with multi-head self-attention mechanisms [1]. This enables significantly more parallelization during training [1]. BERT adapts this architecture bidirectionally [2].",
         "local (fallback)",
     ))):
         report, integrity, removed = await synthesize_report(
             question="What is the Transformer architecture?",
             depth=ResearchDepth.STANDARD,
-            papers=[paper],
+            papers=[paper, paper2],
             claims=[],
-            citations=[citation],
+            citations=[citation, citation2],
             anchor_paper=paper,
             debug_info=debug_info,
         )
@@ -159,6 +184,7 @@ async def test_fastapi_lifespan_warmups(monkeypatch, caplog):
     """FastAPI lifespan warms up embedding, reranker, NLI, and 1-token Ollama call."""
     from backend.main import lifespan, app
     monkeypatch.setattr(settings, "LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("SKIP_MODEL_WARMUP", "false")
 
     mock_emb = MagicMock()
     mock_rerank = MagicMock()

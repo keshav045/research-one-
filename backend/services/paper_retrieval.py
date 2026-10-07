@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 import httpx
+import uuid
 
 from ..config import settings
 from ..models.schemas import Paper, ResearchDepth, ResearchSource
@@ -403,11 +404,17 @@ def _format_arxiv_query_expr(phrase: str) -> str:
     if "kv cache" in lower_p or "kv-cache" in lower_p:
         return 'all:KV AND all:cache'
     if "quantization" in lower_p and ("weight-only" in lower_p or "weight only" in lower_p):
-        return 'all:weight AND all:quantization AND all:LLM'
+        if any(k in lower_p for k in ["llm", "language model", "transformer"]):
+            return 'all:weight AND all:quantization AND all:LLM'
+        return 'all:weight AND all:quantization'
     if "quantization" in lower_p:
-        return 'all:quantization AND all:LLM'
+        if any(k in lower_p for k in ["llm", "language model", "transformer"]):
+            return 'all:quantization AND all:LLM'
+        return 'all:quantization'
     if "pruning" in lower_p:
-        return 'all:pruning AND all:LLM'
+        if any(k in lower_p for k in ["llm", "language model", "transformer"]):
+            return 'all:pruning AND all:LLM'
+        return 'all:pruning'
 
     stop_words = frozenset(["the", "a", "an", "is", "are", "for", "in", "on", "of", "and", "or", "to", "with", "what", "how", "terms"])
     words = [w for w in re.findall(r'[a-zA-Z0-9\-]+', cleaned) if len(w) > 1 and w.lower() not in stop_words]

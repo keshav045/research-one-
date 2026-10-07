@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.responses import Response
@@ -20,14 +18,19 @@ from ..models.schemas import (
     StartResearchRequest,
 )
 from ..services.research_workflow import job_to_investigation, run_research_pipeline
+from ..security import verify_api_key, rate_limit_general, rate_limit_research
 
-router = APIRouter(prefix="/api/research", tags=["research"])
+router = APIRouter(
+    prefix="/api/research",
+    tags=["research"],
+    dependencies=[Depends(verify_api_key), Depends(rate_limit_general)],
+)
 
 
 # ─── Start Research ────────────────────────────────────────────────────────────
 
 
-@router.post("", response_model=ResearchInvestigation, status_code=status.HTTP_202_ACCEPTED)
+@router.post("", response_model=ResearchInvestigation, status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(rate_limit_research)])
 async def start_research(
     req: StartResearchRequest,
     background_tasks: BackgroundTasks,
@@ -137,10 +140,6 @@ async def get_job_papers(
     papers: list[Paper] = []
     for r in records:
         authors = r.get_authors()
-        passages = [
-            {"id": p.get("id", ""), "page": p.get("page", 1), "section": p.get("section", ""), "text": p.get("text", "")}
-            for p in r.get_passages()
-        ]
         papers.append(
             Paper(
                 id=r.id.split("::")[-1],
@@ -299,7 +298,11 @@ async def get_job_debug(
 
 # ─── Direct Compatibility Router (/research) ──────────────────────────────────
 
-direct_router = APIRouter(prefix="/research", tags=["research-direct"])
+direct_router = APIRouter(
+    prefix="/research",
+    tags=["research-direct"],
+    dependencies=[Depends(verify_api_key), Depends(rate_limit_general)],
+)
 direct_router.add_api_route("", start_research, methods=["POST"], response_model=ResearchInvestigation, status_code=status.HTTP_202_ACCEPTED)
 direct_router.add_api_route("/{job_id}", get_research, methods=["GET"], response_model=ResearchInvestigation)
 direct_router.add_api_route("", list_research, methods=["GET"], response_model=list[ResearchInvestigation])

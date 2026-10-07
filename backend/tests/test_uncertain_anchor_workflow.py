@@ -19,6 +19,7 @@ from backend.models.schemas import (
     CitationStatus,
     ResearchReport,
     ReportSection,
+    ReportParagraph,
     IntegrityMetrics,
 )
 from backend.services.research_workflow import run_research_pipeline
@@ -146,12 +147,17 @@ async def test_workflow_uncertain_anchor_reaches_final_status(monkeypatch):
         findings=[
             ReportSection(
                 sectionTitle="Key Findings",
-                paragraphs=[],
+                paragraphs=[
+                    ReportParagraph(
+                        text="The architecture relies entirely on an attention mechanism to draw global dependencies between input and output [1].",
+                        citations=[mock_citation],
+                    )
+                ],
             )
         ],
         comparisonTable=[],
         conclusion="Conclusion text",
-        references=[],
+        references=[p1],
     )
     monkeypatch.setattr(
         "backend.services.research_workflow.synthesize_report",

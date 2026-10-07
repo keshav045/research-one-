@@ -11,6 +11,7 @@ import asyncio
 import logging
 import math
 import re
+import time
 from collections import Counter
 from datetime import datetime
 from typing import Optional, Any
@@ -894,9 +895,15 @@ def rank_papers(
 
     if not semantic_scores:
         try:
+            t_rank_emb_start = time.perf_counter()
             q_emb = embed_query(question)
             doc_texts = [f"{p.title} {p.abstract[:300]}" for p in cleaned]
             doc_embs = embed_texts(doc_texts)
+            rank_emb_sec = time.perf_counter() - t_rank_emb_start
+            logger.info(
+                "[Ranker] Embedding scoring: papers=%d, embedding_seconds=%.3fs",
+                len(doc_texts), rank_emb_sec
+            )
             # Dot product of normalized vectors
             q_vec = np.asarray(q_emb).squeeze()
             semantic_scores = [float(np.dot(q_vec, np.asarray(d_emb).squeeze())) for d_emb in doc_embs]
@@ -957,26 +964,34 @@ def rank_papers(
         if title_match_bonus > 0:
             reasons.append(f"title_match: {title_match_bonus:.2f}")
 
-        # Domain alignment check for LLM / Transformer questions (Requirement 7)
-        is_llm_question = any(k in question.lower() for k in ["large language model", "llm", "transformer", "language models"])
+        # Topic-aware alignment check: boost papers matching question terms
         paper_text = f"{p.title} {p.abstract or ''}".lower()
+        stop_words = frozenset({"the", "what", "which", "how", "for", "with", "from", "that", "this", "these", "those", "and", "are", "were", "been", "have", "has", "does", "most", "effective", "paper", "papers"})
+        question_terms = [t for t in re.sub(r"[^a-zA-Z0-9\s-]", " ", question.lower()).split() if len(t) > 3 and t not in stop_words]
+        if question_terms:
+            matched_terms = [t for t in question_terms if t in paper_text]
+            if len(matched_terms) >= max(1, len(question_terms) // 2):
+                final_score = min(1.0, final_score + 0.10)
+                reasons.append(f"topic_term_bonus: +0.10 ({len(matched_terms)}/{len(question_terms)})")
 
-        if is_llm_question:
+        # Specific off-topic filter only when user specifically investigates LLM inference/serving
+        is_llm_inference_q = any(k in question.lower() for k in ["llm", "large language model"]) and any(k in question.lower() for k in ["inference", "serving", "latency", "throughput", "kv cache", "quantization", "pruning", "memory"])
+        if is_llm_inference_q:
             has_llm_term = any(k in paper_text for k in ["large language model", "large language models", "llm", "llms", "transformer", "transformers", "language models", "token generation", "autoregressive"])
             has_technique = any(k in paper_text for k in ["quantiz", "pruning", "kv cache", "kv-cache", "speculative decoding", "pagedattention", "flashattention", "vllm", "serving", "latency", "memory bandwidth", "inference acceleration"])
             
-            negative_terms = ["yolo", "object detection", "image segmentation", "convolutional neural", "cnn", "cnns", "imagenet", "medical imaging", "autonomous driving", "r package", "cran", "molecular dynamics", "power grid"]
+            negative_terms = ["yolo", "object detection", "image segmentation", "convolutional neural", "cnn", "cnns", "imagenet", "r package", "cran", "power grid"]
             has_negative = any(re.search(r'\b' + re.escape(neg) + r'\b', paper_text) for neg in negative_terms)
 
             if has_negative and not has_llm_term:
-                final_score *= 0.15  # Severe penalty for off-topic vision / biology / generic ML
+                final_score *= 0.15  # Severe penalty for off-topic vision / generic ML on LLM inference queries
                 reasons.append("off_topic_penalty: -85%")
             elif has_llm_term and has_technique:
-                final_score = min(1.0, final_score + 0.20)
-                reasons.append("llm_inference_alignment_bonus: +0.20")
+                final_score = min(1.0, final_score + 0.15)
+                reasons.append("llm_inference_alignment_bonus: +0.15")
             elif has_llm_term:
-                final_score = min(1.0, final_score + 0.10)
-                reasons.append("llm_term_bonus: +0.10")
+                final_score = min(1.0, final_score + 0.05)
+                reasons.append("llm_term_bonus: +0.05")
 
         # Store transparent relevance scoring and reasons on paper
         p.relevance_score = round(final_score, 4)
@@ -1034,13 +1049,33 @@ def rank_papers(
 
         ranked = final_ranked
     else:
-        # Filter papers below minimum relevance threshold
+        # Filter papers with minimum relevance threshold, but backfill up to target_count
         relevant_pool = [p for p in ranked_pool if getattr(p, "relevance_score", 0.0) >= min_relevance]
-        if relevant_pool:
+        if len(relevant_pool) >= target_count:
             ranked = relevant_pool[:target_count]
         else:
-            logger.info("[Ranker] No candidate papers met strict threshold (%.2f); using top candidates from pool.", min_relevance)
-            ranked = ranked_pool[:target_count]
+            # Backfill from ranked_pool so candidate papers are not starved when few pass strict cutoff
+            ranked = list(relevant_pool)
+            seen_ids = {p.id for p in ranked}
+            for p in ranked_pool:
+                if len(ranked) >= target_count:
+                    break
+                if p.id not in seen_ids:
+                    ranked.append(p)
+                    seen_ids.add(p.id)
+            if relevant_pool:
+                logger.info(
+                    "[Ranker] Only %d candidate paper(s) met strict threshold (%.2f); backfilled up to %d papers from pool.",
+                    len(relevant_pool),
+                    min_relevance,
+                    len(ranked),
+                )
+            else:
+                logger.info(
+                    "[Ranker] No candidate papers met strict threshold (%.2f); using top %d candidates from pool.",
+                    min_relevance,
+                    len(ranked),
+                )
 
     if not ranked:
         logger.info("[Ranker] No candidate papers available after ranking.")

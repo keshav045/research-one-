@@ -13,7 +13,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -171,7 +170,7 @@ def _extract_passages_from_pdf_bytes(paper_id: str, pdf_bytes: bytes) -> list[Pa
         section_re = re.compile(
             r"^(?:\d+\.?\s+)?(Abstract|Introduction|Related Work|Background|Methodology|"
             r"Method|Model Architecture|Experiments?|Results?|Evaluation|Discussion|Conclusion|"
-            r"References|Bibliography|Appendix)\b",
+            r"References|Bibliography|Appendix|Acknowledgements?|Acknowledgments?)\b",
             re.IGNORECASE,
         )
 

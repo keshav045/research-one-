@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -67,12 +68,27 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 
+    # Security & Rate Limiting
+    API_KEY: Optional[str] = None
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_PER_MINUTE: int = 60
+    RATE_LIMIT_RESEARCH_PER_MINUTE: int = 10
+
     # ML Models
     NLI_MODEL: str = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
     EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
     RERANK_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     NLI_DEVICE: str = "cuda"
     NLI_ENTAIL_THRESHOLD: float = 0.80
+
+    # Embedding & Vector Indexing Optimizations
+    TORCH_NUM_THREADS: int = 2
+    EMBED_MAX_LENGTH: int = 128
+    SKIP_NONBODY_SECTIONS: bool = True
+    MAX_PASSAGES_PER_PAPER: int = 0
+    EMBED_CACHE_ENABLED: bool = True
+    EMBED_QUANTIZE: bool = False
+    EMBEDDING_BACKEND: str = "local"  # "local" | "openai"
     RELEVANCE_THRESHOLD: float = 0.30
     ANCHOR_MIN_CITATIONS: int = 1000
     ANCHOR_WEIGHT_REF: float = 0.5

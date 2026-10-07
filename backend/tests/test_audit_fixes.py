@@ -139,6 +139,42 @@ def test_relevance_threshold_filters_irrelevant_papers():
     assert len(getattr(ranked[0], "relevance_reasons", [])) > 0
 
 
+def test_rank_papers_backfills_and_does_not_starve_candidates(monkeypatch):
+    """When only 1 candidate exceeds min_relevance, ranker backfills up to target_count."""
+    monkeypatch.setattr(settings, "MIN_PAPER_RELEVANCE", 0.70)
+    papers = [
+        Paper(
+            id=f"p-{i}",
+            title=f"Candidate Study on Transformers Number {i}",
+            authors=[f"Author {i}"],
+            publicationYear=2020 + (i % 4),
+            journalConference="arXiv",
+            doi=f"10.1234/test-{i}",
+            source="arXiv",
+            abstract=f"Study {i} investigating neural architectures and attention models.",
+            citationCount=100 * (10 - i),
+        )
+        for i in range(1, 10)
+    ]
+    # Ensure paper-1 matches exactly for high score, others have lower semantic/relevance scores
+    papers[0].title = "Large Language Model Inference Optimization via Quantization"
+    papers[0].abstract = "Specific large language model quantization memory and latency speedup."
+
+    ranked = rank_papers(
+        question="What are effective techniques for large language model inference?",
+        papers=papers,
+        question_type="literature_review",
+        depth=ResearchDepth.QUICK,  # Quick depth target_count is 6
+    )
+
+    # Must return 6 papers, not just 1!
+    assert len(ranked) == 6, f"Expected 6 papers backfilled, got {len(ranked)}"
+    assert ranked[0].id == "paper-1"  # Renumbered sequentially
+    assert ranked[0].title == "Large Language Model Inference Optimization via Quantization"
+    # All 6 papers must have distinct original titles
+    assert len({p.title for p in ranked}) == 6
+
+
 # ─── 4. Citation Reference Validation (Req 21) ────────────────────────────────
 
 @pytest.mark.asyncio

@@ -193,15 +193,27 @@ def fallback_query_planner(question: str) -> QueryPlan:
     }
 
 
-def extract_question_facets(question: str) -> list[str]:
+def extract_question_facets(question: str, sub_questions: Optional[list[str]] = None) -> list[str]:
     """Extract topical facets or sub-aspects dynamically for any research question."""
-    if is_llm_inference_optimization_query(question):
-        return [
-            "Quantization & Sparsity",
-            "KV-Cache & Memory Management",
-            "Speculative Decoding",
-            "Kernel & Serving Optimizations",
-        ]
+    # 1. If sub-questions are provided and multiple, synthesize facet titles from them
+    if sub_questions and len(sub_questions) > 1:
+        facets = []
+        for sq in sub_questions:
+            clean = re.sub(
+                r"^(what|how|why|which|when|where|is|are|can|do|does)\s+(are|is|the|do|does)?\s*",
+                "",
+                sq.strip(),
+                flags=re.IGNORECASE,
+            ).rstrip("?").strip()
+            words = clean.split()[:4]
+            if words:
+                facet_title = " ".join(w.capitalize() for w in words)
+                if facet_title not in facets:
+                    facets.append(facet_title)
+        if facets:
+            return facets[:4]
+
+    # 2. Extract key topical concept clusters dynamically from the question
     tokens = re.sub(r"[^a-zA-Z0-9\s-]", " ", question.lower()).split()
     meaningful = [t for t in tokens if len(t) > 2 and t not in STOP_WORDS and t not in META_WORDS]
     if not meaningful:
@@ -215,12 +227,9 @@ def extract_question_facets(question: str) -> list[str]:
 
 async def plan_research_queries(question: str) -> QueryPlan:
     """
-    Plan search queries and sub-questions using LLM, with fallback to original question as only sub-question.
+    Plan search queries and sub-questions using LLM, with fallback to deterministic query planner.
     """
     plan = fallback_query_planner(question)
-    if is_llm_inference_optimization_query(question):
-        logger.info("[QueryPlanner] Using specialized LLM inference query plan (%d concepts, %d queries)", len(plan["target_concepts"]), len(plan["queries"]))
-        return plan
 
     prompt = (
         "You are an academic query planner. Split this research question into 1 to 3 atomic sub-questions.\n"
@@ -240,7 +249,7 @@ async def plan_research_queries(question: str) -> QueryPlan:
         planner_model = get_provider_model(planner_provider) if raw else "none"
 
         if not raw or not raw.strip():
-            logger.warning("[QueryPlanner] Fallback plan used: LLM returned empty reply")
+            logger.info("[QueryPlanner] Fallback plan used: LLM returned empty reply or unavailable")
             plan["sub_questions"] = [question.strip()]
         else:
             match = re.search(r"\{.*\}", raw, re.DOTALL)

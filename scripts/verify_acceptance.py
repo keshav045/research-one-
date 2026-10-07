@@ -15,6 +15,7 @@ Verifies all 9 acceptance criteria from Section 8 of the implementation plan:
 from __future__ import annotations
 
 import collections
+import io
 import re
 import sys
 from pathlib import Path
@@ -30,28 +31,22 @@ from backend.models.schemas import (
     CitationStatus,
     Paper,
     ResearchInvestigation,
-    ResearchReport,
     ResearchDepth,
     ResearchSource,
-    ReportSection,
-    ReportParagraph,
 )
 from datetime import datetime, timezone
 from backend.services.local_llm_service import synthesize_report
-from streamlit_app import build_markdown_report
 from backend.services.pdf_report import build_pdf_report
 from backend.services.report_validator import validate_report
 
 
 def audit_pdf_bytes(pdf_bytes: bytes) -> dict:
-    reader = PdfReader(io.BytesIO(pdf_bytes)) if "io" in globals() else None
-    import io
     reader = PdfReader(io.BytesIO(pdf_bytes))
     OP = re.compile(r"1 0 0 1 ([\d.\-]+) ([\d.\-]+) Tm\s*/\w+ [\d.]+ Tf[^\[]*\[<([0-9a-f]+)>\]TJ")
     c = collections.Counter()
     for i, pg in enumerate(reader.pages):
         content = pg.get_contents()
-        if content:
+        if content is not None:
             raw_data = content.get_data().decode("latin-1", errors="ignore")
             for x, y, _ in OP.findall(raw_data):
                 c[(i, x, y)] += 1

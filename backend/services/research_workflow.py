@@ -495,8 +495,9 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         logger.info("[Pipeline] Stage 5: Building FAISS index over %d passages...", passages_total)
         vector_store = VectorStore()
         try:
-            vector_store.build(enriched_papers)
-            record_stage("vector_indexing", t0, in_count=passages_total, out_count=passages_total)
+            vector_store.build(enriched_papers, question=question)
+            indexed_count = len(vector_store.records)
+            record_stage("vector_indexing", t0, in_count=passages_total, out_count=indexed_count)
         except Exception as exc:
             logger.warning("[Pipeline] Vector store build failed: %s", exc)
             record_stage("vector_indexing", t0, in_count=passages_total, out_count=0, error=str(exc))

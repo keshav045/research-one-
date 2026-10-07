@@ -94,10 +94,10 @@ async def lifespan(app: FastAPI):
     # Ensure PDF cache directory exists
     Path(settings.PDF_CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
-    # Configure PyTorch to use 1 thread to conserve memory in low-RAM cloud containers
+    # Configure PyTorch thread count (defaults to settings.TORCH_NUM_THREADS)
     try:
         import torch
-        torch.set_num_threads(1)
+        torch.set_num_threads(getattr(settings, "TORCH_NUM_THREADS", 2))
     except Exception:
         pass
 
