@@ -380,48 +380,54 @@ def verify_answer_sentences(
             "status": "retained",
         })
 
-    for premise, hypothesis, original_sent, badges in pairs_to_eval:
-        if not premise:
-            removed_details.append({
-                "sentence": original_sent,
-                "type": "claim",
-                "reason": "Missing supporting citation badges or ground-truth premise",
-                "entailment_score": 0.0,
-                "verdict": "UNSUPPORTED",
-            })
-            logger.info("[NLI-Answer] Removed uncited/unsupported claim sentence: '%s'", original_sent[:80])
-            continue
+    # Evaluate all valid (premise, hypothesis) pairs in a single batch forward pass
+    valid_items = [item for item in pairs_to_eval if item[0]]
+    invalid_items = [item for item in pairs_to_eval if not item[0]]
 
+    for _, _, original_sent, _ in invalid_items:
+        removed_details.append({
+            "sentence": original_sent,
+            "type": "claim",
+            "reason": "Missing supporting citation badges or ground-truth premise",
+            "entailment_score": 0.0,
+            "verdict": "UNSUPPORTED",
+        })
+        logger.info("[NLI-Answer] Removed uncited/unsupported claim sentence: '%s'", original_sent[:80])
+
+    if valid_items:
+        batch_pairs = [(premise, hypothesis) for premise, hypothesis, _, _ in valid_items]
         try:
-            res = _evaluate_batch_pairs([(premise, hypothesis)])
-            verdict, confidence, reasoning = res[0]
+            batch_results = _evaluate_batch_pairs(batch_pairs)
         except Exception as exc:
-            logger.warning("[NLI-Answer] Inference failed for sentence, using heuristic fallback: %s", exc)
-            verdict, confidence, reasoning = _heuristic_entailment(premise, hypothesis, premise)
+            logger.warning("[NLI-Answer] Batch inference failed, using heuristic fallback: %s", exc)
+            batch_results = [
+                _heuristic_entailment(p, h, p) for p, h in batch_pairs
+            ]
 
-        if verdict == EntailmentVerdict.ENTAILS and confidence >= threshold:
-            verified_claim_sentences.append(original_sent)
-            verified_details.append({
-                "sentence": original_sent,
-                "type": "claim",
-                "entailment_score": confidence,
-                "verdict": "VERIFIED",
-                "badges": badges,
-                "reasoning": reasoning,
-            })
-        else:
-            removed_details.append({
-                "sentence": original_sent,
-                "type": "claim",
-                "reason": f"Entailment score {confidence:.3f} below threshold {threshold:.2f} ({verdict.value if hasattr(verdict, 'value') else verdict})",
-                "entailment_score": confidence,
-                "verdict": verdict.value if hasattr(verdict, "value") else str(verdict),
-                "reasoning": reasoning,
-            })
-            logger.info(
-                "[NLI-Answer] Removed unsupported sentence: '%s' (verdict=%s, conf=%.3f)",
-                original_sent[:80], verdict, confidence
-            )
+        for (premise, hypothesis, original_sent, badges), (verdict, confidence, reasoning) in zip(valid_items, batch_results):
+            if verdict == EntailmentVerdict.ENTAILS and confidence >= threshold:
+                verified_claim_sentences.append(original_sent)
+                verified_details.append({
+                    "sentence": original_sent,
+                    "type": "claim",
+                    "entailment_score": confidence,
+                    "verdict": "VERIFIED",
+                    "badges": badges,
+                    "reasoning": reasoning,
+                })
+            else:
+                removed_details.append({
+                    "sentence": original_sent,
+                    "type": "claim",
+                    "reason": f"Entailment score {confidence:.3f} below threshold {threshold:.2f} ({verdict.value if hasattr(verdict, 'value') else verdict})",
+                    "entailment_score": confidence,
+                    "verdict": verdict.value if hasattr(verdict, "value") else str(verdict),
+                    "reasoning": reasoning,
+                })
+                logger.info(
+                    "[NLI-Answer] Removed unsupported sentence: '%s' (verdict=%s, conf=%.3f)",
+                    original_sent[:80], verdict, confidence
+                )
 
     # Integrity = verified claim sentences / claim sentences
     total_claim_sentences = len(claim_sentences)

@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     TORCH_NUM_THREADS: int = 4
     EMBED_MAX_LENGTH: int = 128
     SKIP_NONBODY_SECTIONS: bool = True
-    MAX_PASSAGES_PER_PAPER: int = 25
+    MAX_PASSAGES_PER_PAPER: int = 20
     EMBED_CACHE_ENABLED: bool = True
     EMBED_QUANTIZE: bool = False
     EMBEDDING_BACKEND: str = "auto"  # "auto" | "openai" | "local"

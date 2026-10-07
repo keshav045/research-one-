@@ -880,13 +880,38 @@ def rank_papers(
         return []
 
     # 1. Compute semantic relevance scores (Reranker or Embedding cosine)
+    # Pre-filter large candidate pools to top candidate pool (e.g. 20-24 papers)
+    # using fast lexical overlap and citation signals before running neural cross-encoder.
+    # This prevents running 600+ BERT forward passes on CPU which takes 75+ seconds.
+    max_rerank_candidates = max(target_count * 2, 20)
+    if len(cleaned) > max_rerank_candidates:
+        q_tokens = {w for w in re.sub(r"[^\w\s]", "", question.lower()).split() if len(w) > 3}
+        anchor_id = anchor_paper.id if anchor_paper else None
+        anchor_norm = normalize_paper_title(anchor_paper.title) if anchor_paper else ""
+
+        def _pre_rank_score(p: Paper) -> float:
+            if anchor_id and (p.id == anchor_id or normalize_paper_title(p.title) == anchor_norm):
+                return 1e6
+            t_lower = p.title.lower()
+            a_lower = (p.abstract or "").lower()
+            overlap = sum(1 for w in q_tokens if w in t_lower) * 3.0 + sum(1 for w in q_tokens if w in a_lower) * 0.5
+            cites = max(0, getattr(p, "citationCount", 0) or 0)
+            return overlap + math.log1p(cites)
+
+        cleaned.sort(key=_pre_rank_score, reverse=True)
+        active_for_semantic = cleaned[:max_rerank_candidates]
+        remainder_papers = cleaned[max_rerank_candidates:]
+    else:
+        active_for_semantic = cleaned
+        remainder_papers = []
+
     reranker = get_reranker()
     semantic_scores = []
 
     if reranker is not None:
         try:
-            pairs = [[question, f"{p.title}. {p.abstract[:400]}"] for p in cleaned]
-            raw_scores = reranker.predict(pairs)
+            pairs = [[question, f"{p.title}. {p.abstract[:250]}"] for p in active_for_semantic]
+            raw_scores = reranker.predict(pairs, batch_size=32)
             # Sigmoid / normalize to 0..1
             semantic_scores = [1.0 / (1.0 + math.exp(-float(s))) for s in raw_scores]
         except Exception as exc:
@@ -897,7 +922,7 @@ def rank_papers(
         try:
             t_rank_emb_start = time.perf_counter()
             q_emb = embed_query(question)
-            doc_texts = [f"{p.title} {p.abstract[:300]}" for p in cleaned]
+            doc_texts = [f"{p.title} {p.abstract[:300]}" for p in active_for_semantic]
             doc_embs = embed_texts(doc_texts)
             rank_emb_sec = time.perf_counter() - t_rank_emb_start
             logger.info(
@@ -909,7 +934,10 @@ def rank_papers(
             semantic_scores = [float(np.dot(q_vec, np.asarray(d_emb).squeeze())) for d_emb in doc_embs]
         except Exception as exc:
             logger.warning("[Ranker] Embedding scoring failed: %s; using equal weights", exc)
-            semantic_scores = [0.5] * len(cleaned)
+            semantic_scores = [0.5] * len(active_for_semantic)
+
+    cleaned = active_for_semantic + remainder_papers
+    semantic_scores = list(semantic_scores) + [0.1] * len(remainder_papers)
 
     # 2. Score each paper
     scored_papers: list[tuple[float, Paper]] = []

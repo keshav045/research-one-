@@ -73,6 +73,7 @@ os.environ.setdefault("SKIP_MODEL_WARMUP", "true")
 os.environ.setdefault("MAX_PDF_WORKERS", "2")
 os.environ.setdefault("NLI_MODEL", "cross-encoder/nli-deberta-v3-small")
 os.environ.setdefault("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+os.environ.setdefault("EMBEDDING_BACKEND", "auto")
 os.environ.setdefault("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 # Pick LLM provider: prioritize OpenAI if configured, otherwise Gemini if real key exists
@@ -122,7 +123,10 @@ _PIPELINE_LOCK = threading.Lock()
 
 @st.cache_resource(show_spinner=False)
 def get_cached_embedding_model():
-    """Lazy-load the Sentence Transformers embedding model."""
+    """Lazy-load the Sentence Transformers embedding model if using local backend."""
+    backend_mode = getattr(settings, "EMBEDDING_BACKEND", "auto").lower()
+    if backend_mode in ("auto", "openai") and settings.is_openai_configured:
+        return None
     from backend.services.embeddings import get_model
     return get_model()
 
@@ -564,8 +568,12 @@ with st.sidebar:
     else:
         st.markdown("**LLM Status:** `Missing API Key`")
 
+    active_emb_backend = getattr(settings, "EMBEDDING_BACKEND", "auto").lower()
+    is_openai_emb = active_emb_backend in ("auto", "openai") and settings.is_openai_configured
+    emb_display = "text-embedding-3-small (OpenAI)" if is_openai_emb else f"{settings.EMBEDDING_MODEL.split('/')[-1]} (Local CPU)"
+
     st.markdown(f"**NLI Model:** `{settings.NLI_MODEL.split('/')[-1]}`")
-    st.markdown(f"**Embedding:** `{settings.EMBEDDING_MODEL.split('/')[-1]}`")
+    st.markdown(f"**Embedding:** `{emb_display}`")
     st.markdown(f"**Inference Device:** `{settings.NLI_DEVICE.upper()}`")
 
     # Memory Usage Telemetry
@@ -665,7 +673,9 @@ with tab_research:
 
         # Warm up cached models lazily before thread dispatch
         with st.spinner("Preparing ML components (embeddings, reranker, NLI)..."):
-            get_cached_embedding_model()
+            active_emb_backend = getattr(settings, "EMBEDDING_BACKEND", "auto").lower()
+            if not (active_emb_backend in ("auto", "openai") and settings.is_openai_configured):
+                get_cached_embedding_model()
             get_cached_reranker()
             get_cached_nli_components()
 

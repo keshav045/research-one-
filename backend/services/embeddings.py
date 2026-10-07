@@ -217,8 +217,14 @@ def _embed_openai(texts: list[str]) -> Optional[np.ndarray]:
         with httpx.Client(timeout=30.0) as client:
             for i in range(0, len(texts), batch_size):
                 batch = texts[i : i + batch_size]
+                # OpenAI returns 400 Bad Request on empty or purely whitespace strings.
+                # Sanitize each text: ensure at least 1 non-empty character and truncate to 4000 chars.
+                sanitized_batch = [
+                    (t.strip()[:4000] if (t and t.strip()) else "academic passage")
+                    for t in batch
+                ]
                 payload = {
-                    "input": batch,
+                    "input": sanitized_batch,
                     "model": "text-embedding-3-small",
                     "dimensions": 384,
                 }
@@ -244,6 +250,7 @@ def _embed_openai(texts: list[str]) -> Optional[np.ndarray]:
                 norms = np.where(norms == 0, 1e-9, norms)
                 vecs = vecs / norms
                 all_vecs.append(vecs)
+        logger.info("[Embeddings] OpenAI embeddings successfully encoded %d texts", len(texts))
         return np.vstack(all_vecs)
     except Exception as exc:
         logger.warning("[Embeddings] OpenAI embeddings failed: %s; falling back to local model", exc)
