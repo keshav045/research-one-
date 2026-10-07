@@ -29,10 +29,10 @@ class Settings(BaseSettings):
     QWEN_API_KEY: str = ""
     QWEN_MODEL: str = "qwen-plus"
 
-    # Local LLM Fallback (disabled — cloud LLM is active)
+    # Local LLM Fallback (active when OpenAI / cloud fails)
     LOCAL_LLM_MODEL: str = "Qwen/Qwen2.5-0.5B-Instruct"
     LOCAL_LLM_MAX_TOKENS: int = 1536
-    LLM_FALLBACK_LOCAL: bool = False
+    LLM_FALLBACK_LOCAL: bool = True
     OLLAMA_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen2.5:3b-instruct"
 
