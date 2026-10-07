@@ -48,6 +48,13 @@ _REFERENCE_REGEX = re.compile(
     r"(^\[\d+\]|\b(?:references|bibliography)\b|\b(?:vol\.|pp\.|pages|isbn|doi:|arxiv:\d{4}\.\d{4,5})\b|\b(?:in proceedings of|ieee trans|acm comput)\b)",
     re.IGNORECASE,
 )
+_META_PROCEDURAL_REGEX = re.compile(
+    r"^(?:in\s+(?:this\s+section|section\s+\d+|table\s+\d+|appendix|fig(?:ure)?\.?\s*\d+)|"
+    r"the\s+rest\s+of\s+(?:this\s+)?paper\s+is\s+organized|"
+    r"as\s+(?:discussed|shown|detailed|noted|described|illustrated)\s+in\s+(?:section|table|figure|appendix)|"
+    r"we\s+(?:organize|refer\s+the\s+reader|begin\s+by\s+describing|outline\s+the\s+structure))\b",
+    re.IGNORECASE,
+)
 
 _last_removal_counts: Dict[str, int] = {
     "captions": 0,
@@ -55,6 +62,7 @@ _last_removal_counts: Dict[str, int] = {
     "references": 0,
     "fragments_under_8_words": 0,
     "length_out_of_bounds": 0,
+    "procedural_fluff": 0,
 }
 
 
@@ -152,7 +160,19 @@ def _filter_and_extract_sentences(text: str, counts: Dict[str, int]) -> list[str
             counts["references"] += 1
             continue
 
+        # Check procedural / meta-text fluff (Section 2 related work, etc.)
+        if _META_PROCEDURAL_REGEX.search(s_clean):
+            counts["procedural_fluff"] = counts.get("procedural_fluff", 0) + 1
+            continue
+
         sentences.append(s_clean)
+
+    # Sort sentences to prioritize substantive technical assertions
+    _INFORMATIVE_KEYWORDS = re.compile(
+        r"\b(?:propos|achiev|reduc|increas|improv|outperform|introduc|demonstrat|show|evaluat|find|observ|yield|requir|comput|model|architect|attent|layer|param|loss|accurac|score|speed|latenc|throughput|effici|memor|weight|train|infer|dataset|benchmark)\w*\b",
+        re.IGNORECASE,
+    )
+    sentences.sort(key=lambda s: 1 if _INFORMATIVE_KEYWORDS.search(s) else 0, reverse=True)
     return sentences
 
 
@@ -233,27 +253,24 @@ def extract_and_verify_evidence(
                     anchor_scored = [(r, 0.5) for r in anchor_records]
                 anchor_scored.sort(key=lambda x: x[1], reverse=True)
 
-                # Check relevance threshold (>= -1.5 for ms-marco-MiniLM)
                 relevant_anchor = [item for item in anchor_scored if item[1] >= -1.5]
-                if len(relevant_anchor) >= 3:
-                    chosen_passages = anchor_scored[:5]
-                else:
-                    chosen_passages = list(relevant_anchor)
-                    # Add passages from other papers from FAISS top 30
-                    other_candidates = [r for r, _ in faiss_candidates if r.paper_id != anchor_paper_id]
-                    if other_candidates:
-                        if reranker is not None:
-                            other_pairs = [[sub_q, clean_hyphenated_breaks(r.passage.text)] for r in other_candidates]
-                            other_scores = reranker.predict(other_pairs)
-                            other_scored = [(r, float(s)) for r, s in zip(other_candidates, other_scores)]
-                        else:
-                            other_scored = [(r, sc) for r, sc in faiss_candidates if r.paper_id != anchor_paper_id]
-                        other_scored.sort(key=lambda x: x[1], reverse=True)
-                        for item in other_scored:
-                            if len(chosen_passages) >= 5:
-                                break
-                            if not any(item[0].passage.id == cp[0].passage.id for cp in chosen_passages):
-                                chosen_passages.append(item)
+                chosen_passages = list(relevant_anchor[:3] if relevant_anchor else anchor_scored[:2])
+
+                # ALSO add top passages from other papers from FAISS candidates
+                other_candidates = [r for r, _ in faiss_candidates if r.paper_id != anchor_paper_id]
+                if other_candidates:
+                    if reranker is not None:
+                        other_pairs = [[sub_q, clean_hyphenated_breaks(r.passage.text)] for r in other_candidates]
+                        other_scores = reranker.predict(other_pairs)
+                        other_scored = [(r, float(s)) for r, s in zip(other_candidates, other_scores)]
+                    else:
+                        other_scored = [(r, sc) for r, sc in faiss_candidates if r.paper_id != anchor_paper_id]
+                    other_scored.sort(key=lambda x: x[1], reverse=True)
+                    for item in other_scored:
+                        if len(chosen_passages) >= 8:
+                            break
+                        if not any(item[0].passage.id == cp[0].passage.id for cp in chosen_passages):
+                            chosen_passages.append(item)
         else:
             # No anchor: rank from all papers by cross-encoder relevance
             cand_records = [r for r, _ in faiss_candidates]
@@ -265,7 +282,7 @@ def extract_and_verify_evidence(
                 else:
                     scored = list(faiss_candidates)
                 scored.sort(key=lambda x: x[1], reverse=True)
-                chosen_passages = scored[:5]
+                chosen_passages = scored[:8]
 
         # Deduplicate identical passages within this sub-question
         seen_p_texts: set[str] = set()
@@ -280,7 +297,7 @@ def extract_and_verify_evidence(
         for rec, sc in sub_passages:
             passage_text = clean_hyphenated_breaks(rec.passage.text)
             sentences = _filter_and_extract_sentences(passage_text, removal_counts)
-            for sent in sentences[:2]:
+            for sent in sentences[:3]:
                 claim_norm = re.sub(r"[^a-z0-9]", "", sent.lower())
                 pair_key = f"{sub_q}::{claim_norm}"
                 if pair_key in seen_subq_claim_norms:

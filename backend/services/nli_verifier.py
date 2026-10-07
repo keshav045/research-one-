@@ -295,7 +295,11 @@ def verify_answer_sentences(
             return first_sentence, 0.0, [{"sentence": first_sentence, "type": "metadata", "status": "retained"}], []
         return "", 0.0, [], []
 
-    badge_map = {getattr(c, "badgeNumber", 0): c for c in citations}
+    badge_cites: dict[int, list[Any]] = {}
+    for c in citations:
+        b_num = getattr(c, "badgeNumber", 0)
+        badge_cites.setdefault(b_num, []).append(c)
+
     raw_sentences = split_into_sentences(answer_text)
     if not raw_sentences:
         if first_sentence:
@@ -352,8 +356,8 @@ def verify_answer_sentences(
         if badges:
             premise_parts = []
             for b in badges:
-                c = badge_map.get(b)
-                if c:
+                c_list = badge_cites.get(b, [])
+                for c in c_list:
                     premise_parts.append(_extract_premise_for_citation(c))
             premise_text = " ".join(premise_parts) if premise_parts else ""
         else:

@@ -349,8 +349,9 @@ async def generate_plain_answer(
         f"Verified Source Facts:\n{claims_block}\n\n"
         "Instructions:\n"
         "Write a concise academic answer of 2 to 5 sentences directly answering the question.\n"
+        "Synthesize these findings into a coherent, comparative academic summary connecting the evidence.\n"
         "Strict Requirements:\n"
-        "1. Use ONLY the given verified source facts. Add NO new facts, dates, names, or numbers.\n"
+        "1. Use ONLY the given verified source facts. Add NO new facts, dates, names, or unverified claims.\n"
         "2. Preserve the bracketed citation markers [n] directly adjacent to each asserted fact.\n"
         "3. Output PLAIN TEXT ONLY. Do not output markdown titles, lists, or JSON."
     )
@@ -369,9 +370,15 @@ async def generate_plain_answer(
 
     # Deterministic fallback: sentences with real [n] markers
     body_sentences = []
-    for c in verified_citations[:5]:
+    seen_fallback_claims = set()
+    for c in verified_citations[:6]:
         text = c.claim.strip().rstrip(".")
-        body_sentences.append(f"{text} [{c.badgeNumber}].")
+        norm = text.lower()
+        if norm in seen_fallback_claims:
+            continue
+        seen_fallback_claims.add(norm)
+        r_num = ref_index.get(c.paperId, getattr(c, "badgeNumber", 1)) if ref_index else getattr(c, "badgeNumber", 1)
+        body_sentences.append(f"{text} [{r_num}].")
 
     fb_provider = "deterministic_fallback" if not provider_used or provider_used == "none" else f"{provider_used} (failed)"
     return " ".join(body_sentences), fb_provider, "none"
@@ -546,6 +553,8 @@ async def synthesize_report(
 
     references = build_references_from_citations(papers, citations)
     ref_index = {p.id: idx + 1 for idx, p in enumerate(references)}
+    for c in citations:
+        c.badgeNumber = ref_index.get(c.paperId, 1)
     comparison_table = build_comparison_table(papers, citations)
 
     # 1. Generate plain-text claim sentences using reference indices
@@ -577,12 +586,9 @@ async def synthesize_report(
 
     # Citation Validation: ensure all [n] badges map to an existing reference and collapse repeats
     ref_count = len(references)
-    badge_to_ref = {c.badgeNumber: ref_index.get(c.paperId, 1) for c in citations}
 
-    def _map_to_ref(match):
+    def _validate_ref(match):
         num = int(match.group(1))
-        if num in badge_to_ref:
-            return f"[{badge_to_ref[num]}]"
         if 1 <= num <= ref_count:
             return f"[{num}]"
         logger.warning(
@@ -592,7 +598,7 @@ async def synthesize_report(
         )
         return ""
 
-    verified_answer = re.sub(r"\[(\d+)\]", _map_to_ref, verified_answer)
+    verified_answer = re.sub(r"\[(\d+)\]", _validate_ref, verified_answer)
     verified_answer = collapse_repeated_citations(verified_answer)
     verified_answer = re.sub(r"\s+([.,;:!?])", r"\1", verified_answer)
     verified_answer = re.sub(r"\s+", " ", verified_answer).strip()
