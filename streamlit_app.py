@@ -1124,7 +1124,8 @@ with tab_research:
                     with f_col4:
                         st.metric("4. Full-Text", dbg.get("full_text_papers", "-"))
                     with f_col5:
-                        st.metric("5. Passages", investigation.passagesTotal or dbg.get("passages_total", "-"))
+                        passages_val = getattr(investigation, "passages_total", None) or getattr(investigation, "passagesTotal", None) or dbg.get("passages_total", "-")
+                        st.metric("5. Passages", passages_val)
                     with f_col6:
                         st.metric("6. Ev-Bearing", dbg.get("evidence_bearing_papers", "-"))
                     with f_col7:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
@@ -286,6 +285,10 @@ class ResearchInvestigation(BaseModel):
     pipeline: list[PipelineStep] = Field(default_factory=list)
     report: Optional[ResearchReport] = None
     debug: Optional[dict[str, Any]] = None
+
+    @property
+    def passagesTotal(self) -> int:
+        return self.passages_total
 
 
 
