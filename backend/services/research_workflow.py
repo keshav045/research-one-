@@ -50,6 +50,8 @@ from .paper_retrieval import (
     enrich_papers_with_openalex,
     get_and_clear_retrieval_errors,
     get_and_clear_s2_call_records,
+    get_source_status,
+    reset_retrieval_session,
 )
 from .ranker import rank_papers, select_anchor_paper, normalize_paper_title, filter_and_deduplicate
 from .pdf_extractor import extract_papers_batch
@@ -332,6 +334,7 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         # ─── Phase 2: Candidate Retrieval ─────────────────────────────────────
         t0 = time.time()
         logger.info("[Pipeline] Stage 2: Candidate Retrieval across sources...")
+        reset_retrieval_session()
         raw_papers = await retrieve_papers(
             question, depth, sources,
             api_key_s2=settings.SEMANTIC_SCHOLAR_API_KEY,
@@ -339,6 +342,8 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
             title_guesses=title_guesses,
             question_type=q_type,
         )
+        debug_info["papers_discovered"] = len(raw_papers)
+        debug_info["source_status"] = get_source_status()
         record_stage("candidate_retrieval", t0, in_count=len(queries), out_count=len(raw_papers))
         r_errors = get_and_clear_retrieval_errors()
         if r_errors:
@@ -383,6 +388,7 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
 
         # 1. Deduplicate candidate papers
         deduped_candidates = filter_and_deduplicate(raw_papers)
+        debug_info["unique_papers"] = len(deduped_candidates)
 
         # 2. Enrich candidate papers with S2 batch citations & metadata
         enriched_candidates = await enrich_papers_with_s2(deduped_candidates)
@@ -392,7 +398,7 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
 
         anchor_paper = None
         alternate_paper = None
-        anchor_debug: dict[str, Any] = {"anchor_paper_id": None, "reason": "not_factual_lookup"}
+        anchor_debug: dict[str, Any] = {"anchor_paper_id": None, "anchor_rule": "none", "anchor_confidence": "none", "reason": "not_factual_lookup"}
         if q_type == "factual_lookup":
             anchor_paper, enriched_candidates, anchor_debug = await select_anchor_paper(enriched_candidates, title_guesses, question=question)
             alt_id = anchor_debug.get("alternate_paper_id")
@@ -403,6 +409,10 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
                     None,
                 )
 
+        if not anchor_paper:
+            anchor_debug["anchor_confidence"] = "none"
+            anchor_debug["anchor_paper_id"] = None
+
         # 3. Rank papers and cut to top N AFTER enrichment
         ranked_papers = rank_papers(
             question=question,
@@ -412,6 +422,8 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
             depth=depth,
             anchor_paper=anchor_paper,
         )
+
+        debug_info["relevant_papers"] = len(ranked_papers)
 
         if anchor_paper:
             # Map anchor paper to its assigned sequential ID in ranked_papers
@@ -445,7 +457,10 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         enriched_papers = await extract_papers_batch(ranked_papers, max_workers=settings.MAX_PDF_WORKERS)
         
         passages_total = sum(len(p.passages or []) for p in enriched_papers)
+        full_text_count = sum(1 for p in enriched_papers if len(p.passages or []) > 0 and not getattr(p, "is_abstract_only", False))
         job.passages_total = passages_total
+        debug_info["passages_total"] = passages_total
+        debug_info["full_text_papers"] = full_text_count
         debug_info["passages_per_paper"] = {
             p.title[:60]: len(p.passages or []) for p in enriched_papers
         }
@@ -505,6 +520,13 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         debug_info["evidence_filter_removals"] = removal_counts
         verified_count = sum(1 for c in citations if c.status == CitationStatus.VERIFIED)
         partial_count = sum(1 for c in citations if c.status == CitationStatus.PARTIALLY_SUPPORTED)
+        total_cand_claims = len(claims) + len(rejected_claims)
+        debug_info["candidate_claims"] = total_cand_claims
+        evidence_bearing_count = len({c.paperId for c in citations if c.status == CitationStatus.VERIFIED})
+        debug_info["evidence_bearing_papers"] = evidence_bearing_count
+        debug_info["verified_claims"] = verified_count
+        debug_info["contradicted_claims"] = sum(1 for c in citations if c.status == CitationStatus.CONTRADICTED)
+        debug_info["insufficient_claims"] = len(rejected_claims) + sum(1 for c in citations if c.status == CitationStatus.UNSUPPORTED)
         record_stage("evidence_verification", t0, in_count=passages_total, out_count=len(citations))
 
         _advance_step(pipeline, "step-6", "step-7")
@@ -544,6 +566,7 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         # ─── Phase 8: Academic Report Synthesis (Step 6A, 6B, 6C) ─────────────
         t0 = time.time()
         logger.info("[Pipeline] Stage 8: Synthesizing academic report from verified evidence...")
+        anchor_conf_to_pass = anchor_debug.get("anchor_confidence", "none" if anchor_paper is None else "high")
         report, integrity, removed_sentences = await synthesize_report(
             question=question,
             depth=depth,
@@ -551,7 +574,7 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
             claims=claims,
             citations=citations,
             anchor_paper=anchor_paper,
-            anchor_confidence=anchor_debug.get("anchor_confidence", "high"),
+            anchor_confidence=anchor_conf_to_pass,
             alternate_paper=alternate_paper,
             anchor_rule=anchor_debug.get("anchor_rule", "none"),
             stage_stats=stage_stats,
@@ -560,6 +583,15 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         )
         record_stage("report_synthesis", t0, in_count=len(citations), out_count=1)
 
+        # Track Concept Coverage & Research Depth (Requirement 1 & 4)
+        target_conc_list = plan.get("target_concepts", [])
+        concept_cov = getattr(report, "concept_coverage", {})
+        tot_conc = len(concept_cov) if concept_cov else max(1, len(target_conc_list))
+        ver_conc = sum(1 for st in concept_cov.values() if st == "VERIFIED")
+        research_depth_pct = round((ver_conc / max(1, tot_conc) * 100.0), 1)
+        debug_info["research_depth"] = research_depth_pct
+        debug_info["concept_coverage"] = concept_cov
+
         debug_info.setdefault("planner_provider", "none")
         debug_info.setdefault("planner_model", "none")
         debug_info.setdefault("writer_provider", "none")
@@ -567,13 +599,15 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
 
         # Step 6C: Investigation Status Determination
         anchor_is_abstract_only = getattr(anchor_paper, "is_abstract_only", False) if anchor_paper else False
-        anchor_conf = anchor_debug.get("anchor_confidence", "high")
+        anchor_conf = anchor_debug.get("anchor_confidence", "none" if anchor_paper is None else "high")
         confidence_note = anchor_debug.get("confidence_note")
 
         # Replace executiveSummary.split('. ') with the real sentence list
         exec_sentences = split_into_sentences(report.executiveSummary)
-        # Verified claim sentences count (excluding metadata first sentence)
-        claim_sent_count = max(0, len(exec_sentences) - 1) if (len(exec_sentences) > 1 and integrity > 0) else 0
+        # Verified claim sentences count (from verified_sentences details)
+        ver_details = debug_info.get("verified_sentences", [])
+        verified_claims_in_ans = sum(1 for d in ver_details if d.get("type") in ("claim", "qualification") and d.get("status") != "removed")
+        claim_sent_count = verified_claims_in_ans if verified_claims_in_ans > 0 else (1 if (integrity > 0 and len(exec_sentences) >= 1) else 0)
 
         status, status_reasons = determine_investigation_status(
             answer_sent_count=claim_sent_count,
@@ -616,8 +650,21 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         job.unsupported_claims = metrics.unsupportedClaims
         job.contradicted_claims = metrics.contradictedClaims
         job.potential_conflicts = metrics.potentialConflicts
-        job.citation_coverage = round(integrity * 100)
-        job.uncited_sentences = len(removed_sentences)
+        # B7: Validation Gate before saving report
+        from .report_validator import validate_report
+        val_errors = validate_report(report)
+        if val_errors:
+            logger.error("[Pipeline] Report validation gate failed for job %s: %s", job_id, val_errors)
+            status = "generation_error"
+            job.status = "generation_error"
+            fail_desc = "Report validation gate failed: " + "; ".join(val_errors)
+            job.failure_reason = fail_desc
+            debug_info["validation_errors"] = val_errors
+            if status_reasons:
+                status_reasons.append(fail_desc)
+            else:
+                status_reasons = [fail_desc]
+
         job.set_report(report.model_dump())
         job.set_debug(debug_info)
         db.commit()
@@ -652,27 +699,48 @@ def job_to_investigation(job: ResearchJob) -> ResearchInvestigation:
     stage_stats_data = job.get_stage_stats()
     stage_stats = [StageStat(**s) for s in stage_stats_data]
 
-    debug_blob = job.get_debug()
+    debug_blob = job.get_debug() or {}
     raw_cite_integrity = debug_blob.get("citation_integrity", (job.citation_coverage / 100.0 if job.citation_coverage else 0.0))
     cite_integrity_float = raw_cite_integrity / 100.0 if raw_cite_integrity > 1.0 else raw_cite_integrity
 
     total_claims = job.verified_claims + job.partially_supported_claims + job.unsupported_claims + job.contradicted_claims
-    ev_coverage = round((job.verified_claims / total_claims * 100.0), 1) if total_claims > 0 else 0.0
+    cand_claims = debug_blob.get("candidate_claims", total_claims)
+    ev_coverage = round((job.verified_claims / max(1, cand_claims) * 100.0), 1) if cand_claims > 0 else 0.0
 
-    # Overall Research Confidence metric (Requirement 23)
-    if (
-        job.status == "insufficient_evidence"
-        or job.verified_claims == 0
-        or cite_integrity_float < 0.60
-        or (total_claims > 0 and job.contradicted_claims / total_claims >= 0.3)
+    # 13 Required Coverage Metrics (Requirement 1)
+    papers_discovered = debug_blob.get("papers_discovered", job.total_papers)
+    unique_papers = debug_blob.get("unique_papers", job.total_papers)
+    relevant_papers = debug_blob.get("relevant_papers", job.papers_analyzed)
+    full_text_papers = debug_blob.get("full_text_papers", job.papers_analyzed)
+    evidence_bearing_papers = debug_blob.get("evidence_bearing_papers", min(job.papers_analyzed, job.verified_claims))
+    candidate_claims = cand_claims
+    verified_claims = job.verified_claims
+    contradicted_claims = job.contradicted_claims
+    insufficient_claims = debug_blob.get("insufficient_claims", job.unsupported_claims)
+    citation_integrity = round(cite_integrity_float * 100.0, 1)
+    evidence_coverage = ev_coverage
+    research_depth = debug_blob.get("research_depth", 0.0)
+    source_status = debug_blob.get("source_status", {})
+    concept_coverage = debug_blob.get("concept_coverage", {})
+    retrieval_warnings = debug_blob.get("retrieval_errors", [])
+
+    # Honest Research Confidence metric (Requirement 1 & 6)
+    if job.status == "insufficient_evidence" or job.verified_claims == 0:
+        conf = "NONE"
+    elif (
+        cite_integrity_float < 0.60
+        or research_depth < 30.0
+        or (evidence_bearing_papers <= 1 and len(concept_coverage) >= 3)
+        or bool(retrieval_warnings and evidence_bearing_papers <= 1)
     ):
         conf = "LOW"
     elif (
         job.verified_claims >= 4
         and cite_integrity_float >= 0.85
-        and job.papers_analyzed >= 3
+        and evidence_bearing_papers >= 3
         and job.contradicted_claims == 0
-        and not debug_blob.get("retrieval_errors")
+        and not retrieval_warnings
+        and research_depth >= 50.0
     ):
         conf = "HIGH"
     else:
@@ -693,9 +761,25 @@ def job_to_investigation(job: ResearchJob) -> ResearchInvestigation:
         contradictedClaims=job.contradicted_claims,
         potentialConflicts=job.potential_conflicts,
         citationCoverage=job.citation_coverage,
-        citation_integrity=round(cite_integrity_float * 100.0, 1),
-        evidence_coverage=ev_coverage,
+
+        # ── Coverage Metrics ──
+        papers_discovered=papers_discovered,
+        unique_papers=unique_papers,
+        relevant_papers=relevant_papers,
+        full_text_papers=full_text_papers,
+        evidence_bearing_papers=evidence_bearing_papers,
+        candidate_claims=candidate_claims,
+        verified_claims=verified_claims,
+        contradicted_claims=contradicted_claims,
+        insufficient_claims=insufficient_claims,
+        citation_integrity=citation_integrity,
+        evidence_coverage=evidence_coverage,
+        research_depth=research_depth,
         research_confidence=conf,
+        source_status=source_status,
+        concept_coverage=concept_coverage,
+        retrieval_warnings=retrieval_warnings,
+
         uncitedSentences=job.uncited_sentences,
         passages_total=job.passages_total,
         failure_reason=job.failure_reason,

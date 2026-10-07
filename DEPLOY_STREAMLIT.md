@@ -114,7 +114,8 @@ Click **Save** and then **Deploy!**
 | **Memory (RAM)** | ~2.7 GB max | Uses `bge-small`, `nli-deberta-v3-small`, PyTorch CPU single thread, and default `Quick` depth (3–4 papers). |
 | **vCPU** | ~2 shared cores | Lazy model loading via `@st.cache_resource`; PDF workers throttled to 2. |
 | **Concurrency** | Single container | Guarded with `threading.Lock` so only one pipeline run executes in memory at a time. |
-| **Filesystem** | Ephemeral | SQLite resets on container restart/hibernation; UI includes clear notice. |
+| **Filesystem & Disk Cache** | Ephemeral | SQLite and local disk response cache are lost when the app container restarts or hibernates. UI includes clear notices. |
+| **Outbound IP & API Limits** | Shared Cloud IP | On Streamlit Community Cloud the egress IP is shared across apps, so unauthenticated Semantic Scholar and arXiv calls can be rate-limited quickly. Always configure `SEMANTIC_SCHOLAR_API_KEY` and `OPENALEX_EMAIL` in Streamlit secrets for stable throughput. |
 | **Cold Starts** | Apps hibernate on idle | `SKIP_MODEL_WARMUP=true` allows instant app UI render; models load only when research begins. |
 
 ---

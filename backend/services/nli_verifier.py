@@ -28,7 +28,7 @@ if not hasattr(torch, "accelerator"):
 
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-from ..models.schemas import AtomicClaimVerification, EntailmentVerdict
+from ..models.schemas import AtomicClaimVerification, CitationStatus, EntailmentVerdict
 from ..config import settings
 from .text_utils import split_into_sentences
 
@@ -307,6 +307,9 @@ def verify_answer_sentences(
     if first_sentence:
         if raw_sentences and raw_sentences[0].strip() == first_sentence.strip():
             metadata_sentence = raw_sentences.pop(0)
+        elif raw_sentences and any(q in raw_sentences[0].lower() for q in ("research coverage is insufficient", "research coverage is currently limited")):
+            # Answer starts with a dedicated research coverage statement; do not overwrite or prepend
+            metadata_sentence = None
         else:
             metadata_sentence = first_sentence.strip()
     elif raw_sentences:
@@ -317,8 +320,29 @@ def verify_answer_sentences(
         ):
             metadata_sentence = raw_sentences.pop(0)
 
-    # Claim sentences are the substantive assertion sentences (denominator of integrity)
-    claim_sentences = list(raw_sentences)
+    def _is_qualification_sentence(s: str) -> bool:
+        low = s.lower().strip()
+        kw = (
+            "research coverage is currently limited",
+            "research coverage is insufficient",
+            "insufficient verified evidence",
+            "only one relevant paper with usable evidence",
+            "only 1 relevant paper",
+            "relevant paper(s) with usable evidence",
+            "no definitive foundational",
+            "foundational anchor paper: not identified",
+            "anchor confidence: none",
+        )
+        return any(k in low for k in kw)
+
+    # Separate substantive claim sentences from scope/qualification statements
+    claim_sentences = []
+    qualification_sentences = []
+    for s in raw_sentences:
+        if not re.search(r"\[\d+\]", s) and _is_qualification_sentence(s):
+            qualification_sentences.append(s)
+        else:
+            claim_sentences.append(s)
 
     threshold = getattr(settings, "NLI_ENTAIL_THRESHOLD", 0.80)
     pairs_to_eval: list[tuple[str, str, str, list[int]]] = []
@@ -349,6 +373,13 @@ def verify_answer_sentences(
             "status": "retained",
         })
 
+    for q_sent in qualification_sentences:
+        verified_details.append({
+            "sentence": q_sent,
+            "type": "qualification",
+            "status": "retained",
+        })
+
     for premise, hypothesis, original_sent, badges in pairs_to_eval:
         if not premise:
             removed_details.append({
@@ -364,11 +395,9 @@ def verify_answer_sentences(
         try:
             res = _evaluate_batch_pairs([(premise, hypothesis)])
             verdict, confidence, reasoning = res[0]
-            entail_score = confidence if verdict == EntailmentVerdict.ENTAILS else (0.50 if verdict == EntailmentVerdict.NEUTRAL else 0.0)
         except Exception as exc:
             logger.warning("[NLI-Answer] Inference failed for sentence, using heuristic fallback: %s", exc)
             verdict, confidence, reasoning = _heuristic_entailment(premise, hypothesis, premise)
-            entail_score = 0.50 if verdict == EntailmentVerdict.NEUTRAL else 0.0
 
         if verdict == EntailmentVerdict.ENTAILS and confidence >= threshold:
             verified_claim_sentences.append(original_sent)
@@ -396,13 +425,19 @@ def verify_answer_sentences(
 
     # Integrity = verified claim sentences / claim sentences
     total_claim_sentences = len(claim_sentences)
-    integrity = (len(verified_claim_sentences) / total_claim_sentences) if total_claim_sentences > 0 else 0.0
-
-    if metadata_sentence and verified_claim_sentences:
-        verified_answer_text = f"{metadata_sentence} " + " ".join(verified_claim_sentences)
-    elif metadata_sentence:
-        verified_answer_text = metadata_sentence
+    if total_claim_sentences > 0:
+        integrity = len(verified_claim_sentences) / total_claim_sentences
+    elif qualification_sentences or metadata_sentence:
+        integrity = 1.0 if any(getattr(c, "status", None) == CitationStatus.VERIFIED for c in citations) else 0.0
     else:
-        verified_answer_text = " ".join(verified_claim_sentences)
+        integrity = 0.0
+
+    all_retained_sentences = []
+    if metadata_sentence:
+        all_retained_sentences.append(metadata_sentence)
+    all_retained_sentences.extend(verified_claim_sentences)
+    all_retained_sentences.extend(qualification_sentences)
+
+    verified_answer_text = " ".join(all_retained_sentences)
 
     return verified_answer_text, round(integrity, 3), verified_details, removed_details

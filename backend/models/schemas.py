@@ -225,6 +225,13 @@ class ResearchReport(BaseModel):
     methodology: str
     findings: list[ReportSection]
     comparisonTable: list[ComparisonRow] = Field(default_factory=list)
+    technique_comparison: list[dict[str, Any]] = Field(default_factory=list)
+    research_coverage: str = ""
+    insufficient_evidence: list[str] = Field(default_factory=list)
+    contradicted_findings: list[str] = Field(default_factory=list)
+    source_distribution: dict[str, int] = Field(default_factory=dict)
+    retrieval_warnings: list[str] = Field(default_factory=list)
+    concept_coverage: dict[str, str] = Field(default_factory=dict)
     computationalRequirements: str = ""
     contradictoryEvidence: str = ""
     limitations: list[str] = Field(default_factory=list)
@@ -250,9 +257,25 @@ class ResearchInvestigation(BaseModel):
     contradictedClaims: int = 0
     potentialConflicts: int = 0
     citationCoverage: float = 0.0
+    
+    # ── Detailed Coverage Metrics ──
+    papers_discovered: int = 0
+    unique_papers: int = 0
+    relevant_papers: int = 0
+    full_text_papers: int = 0
+    evidence_bearing_papers: int = 0
+    candidate_claims: int = 0
+    verified_claims: int = 0
+    contradicted_claims: int = 0
+    insufficient_claims: int = 0
     citation_integrity: float = 0.0
     evidence_coverage: float = 0.0
+    research_depth: float = 0.0
     research_confidence: str = "MEDIUM"
+    source_status: dict[str, str] = Field(default_factory=dict)
+    concept_coverage: dict[str, str] = Field(default_factory=dict)
+    retrieval_warnings: list[str] = Field(default_factory=list)
+
     uncitedSentences: int = 0
     passages_total: int = 0
     failure_reason: Optional[str] = None

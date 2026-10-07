@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     CORE_ENABLED: bool = False
 
     # Relevance Thresholds
-    MIN_PAPER_RELEVANCE: float = 0.40
+    MIN_PAPER_RELEVANCE: float = 0.30
 
     # Feature Flags
     SEED_PAPERS_ENABLED: bool = True
@@ -107,11 +107,11 @@ class Settings(BaseSettings):
 
     @property
     def is_gemini_configured(self) -> bool:
-        return bool(self.GEMINI_API_KEY) and self.GEMINI_API_KEY != "your_gemini_api_key_here"
+        return bool(self.GEMINI_API_KEY) and self.GEMINI_API_KEY.strip() not in ("your_gemini_api_key_here", "xxx", "")
 
     @property
     def is_qwen_configured(self) -> bool:
-        return bool(self.QWEN_API_KEY) and self.QWEN_API_KEY != "your_qwen_api_key_here"
+        return bool(self.QWEN_API_KEY) and self.QWEN_API_KEY.strip() not in ("your_qwen_api_key_here", "xxx", "")
 
     @property
     def is_local_llm_configured(self) -> bool:

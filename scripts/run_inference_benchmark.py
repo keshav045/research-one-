@@ -20,7 +20,7 @@ async def main():
     create_tables()
     db = SessionLocal()
 
-    q = "What are the most effective techniques for reducing the computational cost and memory usage of large language models during inference?"
+    q = "What are the most effective techniques for optimizing large language model inference in terms of memory usage, latency, and computational cost?"
     job_id = "bench-llm-inference-efficiency"
 
     # Clean previous run if exists
@@ -44,41 +44,55 @@ async def main():
     inv = job_to_investigation(job)
 
     print("\n" + "="*80)
-    print(f"=== Benchmark Results for: {job_id} ===")
+    print(f"=== BENCHMARK REPORT: {job_id} ===")
     print("="*80)
     print(f"Status: {inv.status}")
-    print(f"Research Confidence: {inv.research_confidence}")
-    print(f"Citation Integrity: {inv.citation_integrity}%")
-    print(f"Evidence Coverage: {inv.evidence_coverage}%")
-    print(f"Citation Coverage: {inv.citationCoverage}%")
-    print(f"Papers Analyzed: {inv.papersAnalyzed}")
-    print(f"Total Passages Extracted: {inv.passages_total}")
-    print(f"Verified Claims: {inv.verifiedClaims}")
-    print(f"Partially Supported Claims: {inv.partiallySupportedClaims}")
-    print(f"Unsupported Claims: {inv.unsupportedClaims}")
-    print(f"Contradicted Claims: {inv.contradictedClaims}")
-    if inv.failure_reason:
-        print(f"Failure / Warning Reasons: {inv.failure_reason}")
+    print(f"\n--- REQUIRED RESEARCH METRICS ---")
+    print(f"- discovered papers:        {inv.papers_discovered}")
+    print(f"- unique papers:            {inv.unique_papers}")
+    print(f"- relevant papers:          {inv.relevant_papers}")
+    print(f"- full-text papers:         {inv.full_text_papers}")
+    print(f"- evidence-bearing papers:  {inv.evidence_bearing_papers}")
+    print(f"- candidate claims:         {inv.candidate_claims}")
+    print(f"- verified claims:          {inv.verified_claims}")
+    print(f"- contradicted claims:      {inv.contradicted_claims}")
+    print(f"- insufficient claims:      {inv.insufficient_claims}")
+    print(f"- citation integrity:       {inv.citation_integrity}%")
+    print(f"- evidence coverage:        {inv.evidence_coverage}%")
+    print(f"- research depth:           {inv.research_depth}%")
+    print(f"- research confidence:      {inv.research_confidence}")
+    print(f"- source failures / status: {json.dumps(inv.source_status or {}, indent=2)}")
+
+    print(f"\n--- CONCEPT COVERAGE ---")
+    if inv.concept_coverage:
+        for concept, status in inv.concept_coverage.items():
+            mark = "[VERIFIED]" if status == "VERIFIED" else "[INSUFFICIENT]"
+            print(f"  {concept:<45} {mark}")
+    else:
+        print("  None recorded")
+
+    if inv.report and inv.report.retrieval_warnings:
+        print(f"\n--- RETRIEVAL WARNINGS ---")
+        for w in inv.report.retrieval_warnings:
+            print(f"  - {w}")
 
     if inv.report:
-        print("\n--- Executive Summary ---")
+        print("\n--- EXECUTIVE SUMMARY ---")
         print(inv.report.executiveSummary)
 
-        print("\n--- Comparison Table Rows ---")
-        for i, row in enumerate(inv.report.comparisonTable):
-            print(f"[{i+1}] {row.title} ({row.year}) | Venue: {row.venue} | Citations: {row.citationCount}")
+        if inv.report.technique_comparison:
+            print("\n--- TECHNIQUE COMPARISON ---")
+            for tc in inv.report.technique_comparison:
+                print(f"  - {tc.get('technique')}: Status={tc.get('evidence_status')}, Finding={tc.get('key_finding')}")
 
-        print("\n--- References ---")
+        if inv.report.insufficient_evidence:
+            print("\n--- INSUFFICIENT EVIDENCE CONCEPTS ---")
+            for ie in inv.report.insufficient_evidence:
+                print(f"  - {ie}")
+
+        print("\n--- REFERENCES ---")
         for ref in inv.report.references:
-            print(f"- [{ref.id}] {ref.title} ({ref.publicationYear}) - Authors: {', '.join(ref.authors[:3])}")
-
-        print("\n--- Findings & Verified Techniques ---")
-        for sec in inv.report.findings:
-            print(f"\nSection: {sec.sectionTitle}")
-            for p in sec.paragraphs:
-                print(f"Text: {p.text}")
-                for c in p.citations:
-                    print(f"  Badge [{c.badgeNumber}] (p.{c.page}): {c.claim[:100]} [{c.status}]")
+            print(f"  - [{ref.id}] {ref.title} ({ref.publicationYear}) - Authors: {', '.join(ref.authors[:3])}")
 
     db.close()
     print("\n=== Benchmark Completed Successfully ===")

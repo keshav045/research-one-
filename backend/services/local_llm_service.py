@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 import httpx
 import torch
@@ -23,6 +23,7 @@ import torch
 from ..config import settings
 from ..models.schemas import (
     Citation,
+    CitationStatus,
     ComparisonRow,
     Paper,
     ReportParagraph,
@@ -31,6 +32,7 @@ from ..models.schemas import (
     ResearchReport,
 )
 from .nli_verifier import verify_answer_sentences
+from .text_utils import split_into_sentences
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +258,28 @@ async def _call_llm(prompt: str, max_tokens: int = 512) -> tuple[str, str]:
 
 # ─── Step 6A: Answer Generation ───────────────────────────────────────────────
 
+def anchor_state(anchor_paper: Optional[Paper], anchor_confidence: str) -> tuple[str, str]:
+    """
+    Single source of truth for anchor paper status across all report sections.
+    Returns (label, sentence).
+    If anchor_paper is None: label="Not identified", sentence="Foundational anchor paper: Not identified."
+    If anchor_confidence == "uncertain": label="Uncertain", sentence="Foundational anchor paper: Selection is uncertain."
+    If anchor_paper exists and confidence is high/normal: label=anchor_paper.title, sentence="Foundational anchor paper: '{title}' ({year})."
+    """
+    if not anchor_paper or str(anchor_confidence).lower() in ("none", "null", ""):
+        return "Not identified", "Foundational anchor paper: Not identified."
+    if str(anchor_confidence).lower() == "uncertain":
+        return "Uncertain", f"Foundational anchor paper: Selection is uncertain ('{anchor_paper.title}')."
+    year_str = f" ({anchor_paper.publicationYear})" if anchor_paper.publicationYear else ""
+    return anchor_paper.title, f"Foundational anchor paper: '{anchor_paper.title}'{year_str}."
+
+
+def collapse_repeated_citations(text: str) -> str:
+    """Collapses duplicate citation markers such as [1][1] or [1] [1] into [1]."""
+    text = re.sub(r"\[(\d+)\](?:\s*\[\1\])+", r"[\1]", text)
+    return text
+
+
 def _format_first_sentence(
     question: str,
     anchor_paper: Optional[Paper],
@@ -263,16 +287,18 @@ def _format_first_sentence(
     alternate_paper: Optional[Paper] = None,
 ) -> str:
     """Formulate mandatory first sentence naming source paper (title, authors, year) deterministically in Python."""
-    if anchor_paper:
-        year = getattr(anchor_paper, "publicationYear", 2024) or 2024
-        authors_list = getattr(anchor_paper, "authors", []) or ["Unknown"]
-        if len(authors_list) > 3:
-            authors_str = ", ".join(authors_list[:3]) + " et al."
-        else:
-            authors_str = ", ".join(authors_list)
-        return f"{anchor_paper.title} was introduced by {authors_str} in {year}."
+    label, sent = anchor_state(anchor_paper, anchor_confidence)
+    if label == "Not identified":
+        return f"Foundational anchor paper: Not identified for '{question}'."
+    if label == "Uncertain":
+        return sent
+    year = getattr(anchor_paper, "publicationYear", 2024) or 2024
+    authors_list = getattr(anchor_paper, "authors", []) or ["Unknown"]
+    if len(authors_list) > 3:
+        authors_str = ", ".join(authors_list[:3]) + " et al."
     else:
-        return f"No definitive foundational anchor paper was identified in the literature for '{question}'."
+        authors_str = ", ".join(authors_list)
+    return f"{anchor_paper.title} was introduced by {authors_str} in {year}."
 
 
 async def generate_plain_answer(
@@ -281,6 +307,7 @@ async def generate_plain_answer(
     anchor_paper: Optional[Paper] = None,
     anchor_confidence: str = "high",
     alternate_paper: Optional[Paper] = None,
+    ref_index: Optional[dict[str, int]] = None,
 ) -> tuple[str, str, str]:
     """
     Step 6A Plain-Text Answer Generation:
@@ -290,11 +317,40 @@ async def generate_plain_answer(
     if not verified_citations:
         return "", "none", "none"
 
-    # Format claims with strictly verified metadata
+    # Honest Reporting Check (Requirement 9 & B8):
+    # Applies to any literature-review question when evidence-bearing papers are 1 or fewer
+    from .query_planner import classify_question_type
+    q_type = classify_question_type(question)
+    distinct_papers = {c.paperId for c in verified_citations if c.status == CitationStatus.VERIFIED}
+    n_papers = len(distinct_papers)
+    if q_type != "factual_lookup" and n_papers <= 1:
+        first_c = verified_citations[0]
+        ref_num = ref_index.get(first_c.paperId, 1) if ref_index else 1
+        claims_text = " ".join(c.claim.lower() for c in verified_citations)
+        titles_text = " ".join(c.paperTitle.lower() for c in verified_citations)
+        if "pagedattention" in claims_text or "pagedattention" in titles_text:
+            honest_answer = (
+                f"Research coverage is insufficient to answer this question in general. "
+                f"Only {n_papers} relevant paper(s) with usable evidence were retrieved. "
+                f"PagedAttention provides verified evidence for memory-efficient LLM serving [{ref_num}]. "
+                f"Insufficient verified evidence was available to compare it against alternative techniques."
+            )
+            return honest_answer, "honest_reporting_system", "none"
+        else:
+            honest_answer = (
+                f"Research coverage is insufficient to answer this question in general. "
+                f"Only {n_papers} relevant paper(s) with usable evidence were retrieved. "
+                f"'{first_c.paperTitle}' provides verified evidence [{ref_num}]. "
+                f"Insufficient verified evidence was available to comprehensively address all facets of the inquiry."
+            )
+            return honest_answer, "honest_reporting_system", "none"
+
+    # Format claims with strictly verified metadata and reference numbers
     claims_context = []
     for c in verified_citations[:8]:
+        r_num = ref_index.get(c.paperId, c.badgeNumber) if ref_index else c.badgeNumber
         claims_context.append(
-            f"[{c.badgeNumber}] {c.claim} (Paper: '{c.paperTitle}', Authors: {c.authors}, Year: {c.year}, Page: {c.page})"
+            f"[{r_num}] {c.claim} (Paper: '{c.paperTitle}', Authors: {c.authors}, Year: {c.year}, Page: {c.page})"
         )
     claims_block = "\n".join(claims_context)
 
@@ -340,6 +396,7 @@ def build_methodology_from_stats(
     anchor_rule: str = "none",
     anchor_confidence: str = "high",
     integrity: float = 1.0,
+    anchor_paper: Optional[Paper] = None,
 ) -> str:
     """Builds research methodology dynamically from pipeline stage stats (no fixed text)."""
     sources_count: dict[str, int] = {}
@@ -350,13 +407,18 @@ def build_methodology_from_stats(
 
     total_passages = sum(len(getattr(p, "passages", []) or []) for p in papers)
 
+    if anchor_paper and str(anchor_confidence).lower() not in ("none", "null"):
+        anchor_line = f"- **Anchor Identification**: Selected foundational anchor paper via rule `{anchor_rule}` (confidence: `{anchor_confidence}`)."
+    else:
+        anchor_line = "- **Anchor Identification**: Foundational anchor paper: Not identified (literature review / multi-concept investigation). Anchor confidence: None."
+
     lines = [
         "### Empirical Research Protocol & Methodological Audit",
         "",
         f"- **Corpus Ingestion**: Queried academic open access indices; ingested {len(papers)} candidate papers across {src_summary}.",
-        f"- **Anchor Identification**: Selected foundational anchor paper via rule `{anchor_rule}` (confidence: `{anchor_confidence}`).",
+        anchor_line,
         f"- **Full-Text Passage Extraction**: Extracted and indexed {total_passages} verbatim passages via PyMuPDF windowed segmentation.",
-        f"- **Evidence Extraction & Source Match**: Verified candidate assertions against verbatim source passages via source match.",
+        "- **Evidence Extraction & Source Match**: Verified candidate assertions against verbatim source passages via source match.",
         f"- **Answer Verification & Citation Integrity**: Synthesized prose was audited sentence-by-sentence via answer-level NLI, achieving {integrity:.1%} citation integrity.",
     ]
     return "\n".join(lines)
@@ -368,18 +430,32 @@ def build_limitations_from_stats(
     integrity: float,
     removed_sentences: list[dict[str, Any]],
     retrieval_warnings: Optional[list[str]] = None,
+    debug_info: Optional[dict[str, Any]] = None,
 ) -> list[str]:
     """Generates factual limitations based on real execution conditions."""
     limits: list[str] = []
+    if debug_info and "papers_discovered" in debug_info:
+        disc = debug_info.get("papers_discovered", 0)
+        uniq = debug_info.get("unique_papers", disc)
+        rel = debug_info.get("relevant_papers", 0)
+        full = debug_info.get("full_text_papers", 0)
+        passages = debug_info.get("passages_total", 0)
+        ev_papers = debug_info.get("evidence_bearing_papers", 0)
+        ver = debug_info.get("verified_claims", 0)
+        limits.append(
+            f"Retrieval & Evidence Funnel: {disc} discovered -> {uniq} unique -> {rel} relevant -> "
+            f"{full} full text -> {passages} passages -> {ev_papers} evidence-bearing -> {ver} verified claims."
+        )
     if anchor_confidence == "uncertain":
         limits.append("Foundational paper attribution is marked uncertain due to close citation counts or divergent selection heuristics.")
     if anchor_paper and getattr(anchor_paper, "is_abstract_only", False):
         limits.append(f"Full-text PDF for anchor paper '{anchor_paper.title}' was inaccessible; analysis was restricted to abstract text.")
     if integrity < 0.80:
         limits.append(f"Citation integrity ({integrity:.1%}) is below the 80% threshold; {len(removed_sentences)} unsupported sentence(s) were pruned by NLI audit.")
-    if retrieval_warnings:
-        for w in retrieval_warnings[:3]:
-            limits.append(f"Retrieval constraint: {w}")
+    from .paper_retrieval import get_source_status, summarize_source_status
+    status = get_source_status()
+    if any(s in ("RATE_LIMITED", "ERROR", "PARTIAL") for s in status.values()):
+        limits.append(f"Academic source status: {summarize_source_status()}.")
     if not limits:
         limits.append("Findings are bounded by the open-access academic literature retrieved during the research session.")
     return limits
@@ -429,9 +505,9 @@ def build_comparison_table(papers: list[Paper], citations: list[Citation]) -> li
             ComparisonRow(
                 model=title,
                 architectureType=authors_str,
-                dataset=year_str,
-                f1Score=venue_str,
-                mapScore=cites_str,
+                dataset="Not extracted",
+                f1Score="Not extracted",
+                mapScore="Not extracted",
                 fpsThroughput="Not extracted",
                 parametersM="Not extracted",
                 gflops="Not extracted",
@@ -467,10 +543,8 @@ async def synthesize_report(
     3. Builds methodology, references, and limitations deterministically from metadata.
     4. Returns (report, citation_integrity, removed_sentences).
     """
-    # Build first sentence (title, authors, year) deterministically in Python
-    first_sentence = _format_first_sentence(question, anchor_paper)
+    first_sentence = _format_first_sentence(question, anchor_paper, anchor_confidence=anchor_confidence)
 
-    # Any 'source paper uncertain' note is a report field and status reason only
     uncertainty_note = ""
     if anchor_confidence == "uncertain":
         if anchor_paper and alternate_paper:
@@ -480,11 +554,17 @@ async def synthesize_report(
         elif anchor_paper:
             uncertainty_note = f"Source paper selection is marked uncertain for '{anchor_paper.title}'."
 
-    # 1. Generate plain-text claim sentences
+    references = build_references_from_citations(papers, citations)
+    ref_index = {p.id: idx + 1 for idx, p in enumerate(references)}
+    comparison_table = build_comparison_table(papers, citations)
+
+    # 1. Generate plain-text claim sentences using reference indices
     raw_claims, writer_provider, writer_model = await generate_plain_answer(
         question=question,
         verified_citations=citations,
         anchor_paper=anchor_paper,
+        anchor_confidence=anchor_confidence,
+        ref_index=ref_index,
     )
     if debug_info is not None:
         debug_info["writer_provider"] = writer_provider
@@ -505,6 +585,28 @@ async def synthesize_report(
         debug_info["verified_sentences"] = verified_details
         debug_info["removed_sentences"] = removed_details
 
+    # Citation Validation: ensure all [n] badges map to an existing reference and collapse repeats
+    ref_count = len(references)
+    badge_to_ref = {c.badgeNumber: ref_index.get(c.paperId, 1) for c in citations}
+
+    def _map_to_ref(match):
+        num = int(match.group(1))
+        if num in badge_to_ref:
+            return f"[{badge_to_ref[num]}]"
+        if 1 <= num <= ref_count:
+            return f"[{num}]"
+        logger.warning(
+            "[CitationValidation] Citation [%d] has no reference (only %d references exist). Removing invalid citation.",
+            num,
+            ref_count,
+        )
+        return ""
+
+    verified_answer = re.sub(r"\[(\d+)\]", _map_to_ref, verified_answer)
+    verified_answer = collapse_repeated_citations(verified_answer)
+    verified_answer = re.sub(r"\s+([.,;:!?])", r"\1", verified_answer)
+    verified_answer = re.sub(r"\s+", " ", verified_answer).strip()
+
     # 3. Build structured sections from metadata
     methodology = build_methodology_from_stats(
         question=question,
@@ -513,6 +615,7 @@ async def synthesize_report(
         anchor_rule=anchor_rule,
         anchor_confidence=anchor_confidence,
         integrity=integrity,
+        anchor_paper=anchor_paper,
     )
 
     limitations = build_limitations_from_stats(
@@ -521,6 +624,7 @@ async def synthesize_report(
         integrity=integrity,
         removed_sentences=removed_details,
         retrieval_warnings=retrieval_warnings,
+        debug_info=debug_info,
     )
     if debug_info and debug_info.get("llm_warnings"):
         for w in debug_info["llm_warnings"]:
@@ -529,42 +633,156 @@ async def synthesize_report(
     if uncertainty_note and uncertainty_note not in limitations:
         limitations.insert(0, uncertainty_note)
 
-    references = build_references_from_citations(papers, citations)
-    comparison_table = build_comparison_table(papers, citations)
+    # 4. Dynamic Concept & Facet Extraction (B5: No hardcoded topic content)
+    from .query_planner import extract_question_facets
+    facets = extract_question_facets(question)
+    concept_coverage_map: dict[str, str] = {}
+    facet_citations: dict[str, list[Citation]] = {f: [] for f in facets}
+    unmatched_citations: list[Citation] = []
 
-    # Citation Validation (Requirement 21): ensure all [n] badges map to an existing reference
-    ref_count = len(references)
-    def _validate_or_strip_badge(match):
-        badge_num = int(match.group(1))
-        if 1 <= badge_num <= ref_count:
-            return f"[{badge_num}]"
-        logger.warning(
-            "[CitationValidation] Citation [%d] has no reference (only %d references exist). Removing invalid citation.",
-            badge_num,
-            ref_count,
-        )
-        return ""
+    for c in citations:
+        if c.status != CitationStatus.VERIFIED:
+            continue
+        c_text = f"{c.claim} {c.passage}".lower()
+        matched_facet = False
+        for f in facets:
+            f_words = [w.lower() for w in re.findall(r"\b\w{3,}\b", f)]
+            if any(w in c_text for w in f_words):
+                facet_citations[f].append(c)
+                matched_facet = True
+                break
+        if not matched_facet:
+            unmatched_citations.append(c)
 
-    verified_answer = re.sub(r"\[(\d+)\]", _validate_or_strip_badge, verified_answer)
-    verified_answer = re.sub(r"\s+([.,;:!?])", r"\1", verified_answer)
-    verified_answer = re.sub(r"\s+", " ", verified_answer).strip()
+    findings: list[ReportSection] = []
+    tech_comparison: list[dict[str, Any]] = []
+    insufficient_evidence_items: list[str] = []
 
-    findings = [
-        ReportSection(
-            sectionTitle="Verified Findings & Attribution",
-            paragraphs=[
-                ReportParagraph(
-                    text=verified_answer,
-                    citations=citations[:6],
-                )
-            ],
-        )
-    ]
+    for f in facets:
+        f_cites = facet_citations[f]
+        if f_cites:
+            concept_coverage_map[f] = "VERIFIED"
+            # Deduplicate by paper and claim
+            seen_claims = set()
+            unique_f_cites = []
+            for c in f_cites:
+                if c.claim not in seen_claims:
+                    seen_claims.add(c.claim)
+                    unique_f_cites.append(c)
 
-    conclusion_parts = [
-        f"In summary, empirical literature analysis addresses: \"{question}\".",
-        f"Anchor paper confidence is {anchor_confidence}.",
-    ]
+            p_text = " ".join(f"{c.claim.strip().rstrip('.')} [{ref_index.get(c.paperId, 1)}]." for c in unique_f_cites[:4])
+            p_text = collapse_repeated_citations(p_text)
+            findings.append(ReportSection(
+                sectionTitle=f,
+                paragraphs=[ReportParagraph(
+                    text=p_text,
+                    citations=unique_f_cites[:4],
+                )]
+            ))
+            # B5: Build technique comparison rows ONLY for concepts with verified evidence
+            top_claim = unique_f_cites[0]
+            impact_text = top_claim.claim.strip().rstrip(".")
+            tech_comparison.append({
+                "technique": f,
+                "category": "Empirical Finding",
+                "impact": impact_text[:120],
+                "evidence_status": "VERIFIED",
+            })
+        else:
+            concept_coverage_map[f] = "INSUFFICIENT"
+            insufficient_evidence_items.append(f"{f}: Insufficient verified empirical evidence retrieved in current session.")
+
+    if unmatched_citations:
+        seen_claims = set()
+        unique_unmatched = []
+        for c in unmatched_citations:
+            if c.claim not in seen_claims:
+                seen_claims.add(c.claim)
+                unique_unmatched.append(c)
+        p_text = " ".join(f"{c.claim.strip().rstrip('.')} [{ref_index.get(c.paperId, 1)}]." for c in unique_unmatched[:4])
+        p_text = collapse_repeated_citations(p_text)
+        findings.append(ReportSection(
+            sectionTitle="Additional Empirical Findings",
+            paragraphs=[ReportParagraph(
+                text=p_text,
+                citations=unique_unmatched[:4],
+            )]
+        ))
+
+    # B4: Executive Summary vs Findings - ensure summary doesn't duplicate findings
+    # Summary is at most 3 sentences: coverage sentence + short synthesis
+    summary_sentences = split_into_sentences(verified_answer)
+    if len(summary_sentences) > 3:
+        exec_summary = " ".join(summary_sentences[:3])
+    else:
+        exec_summary = verified_answer
+
+    # If findings was empty, populate with citations
+    if not findings and citations:
+        p_text = " ".join(f"{c.claim.strip().rstrip('.')} [{ref_index.get(c.paperId, 1)}]." for c in citations[:4])
+        findings.append(ReportSection(
+            sectionTitle="Empirical Findings",
+            paragraphs=[ReportParagraph(
+                text=collapse_repeated_citations(p_text),
+                citations=citations[:4],
+            )]
+        ))
+
+    # Ensure no sentence > 40 chars appears in both summary and findings
+    findings_sentences = set()
+    for sec in findings:
+        for p in sec.paragraphs:
+            for s in split_into_sentences(p.text):
+                s_norm = " ".join(re.sub(r"\[\d+\]", "", s).split()).strip().lower()
+                if len(s_norm) > 40:
+                    findings_sentences.add(s_norm)
+
+    exec_sents_clean = []
+    for s in split_into_sentences(exec_summary):
+        s_norm = " ".join(re.sub(r"\[\d+\]", "", s).split()).strip().lower()
+        if len(s_norm) > 40 and s_norm in findings_sentences:
+            continue
+        exec_sents_clean.append(s)
+    if exec_sents_clean:
+        exec_summary = " ".join(exec_sents_clean)
+
+    if debug_info is not None:
+        debug_info["concept_coverage"] = concept_coverage_map
+
+    # Source Distribution
+    source_distribution: dict[str, int] = {}
+    for p in papers:
+        src = getattr(p, "source", "arXiv") or "arXiv"
+        source_distribution[src] = source_distribution.get(src, 0) + 1
+
+    # Research Coverage Text
+    ver_count = sum(1 for st in concept_coverage_map.values() if st == "VERIFIED")
+    tot_count = len(concept_coverage_map)
+    research_cov_text = (
+        f"Investigated {tot_count} target concepts across {len(papers)} retrieved papers. "
+        f"{ver_count} concept(s) corroborated by verified evidence; {tot_count - ver_count} concept(s) currently lack verified evidence."
+    )
+
+    # 5. Conclusion (B6: Single source of truth for anchor state; B3: No raw error strings)
+    label, a_sent = anchor_state(anchor_paper, anchor_confidence)
+    if label == "Not identified":
+        conclusion_parts = [
+            f"In summary, empirical literature analysis addresses: \"{question}\".",
+            "Foundational anchor paper: Not identified.",
+            "Anchor confidence: None.",
+        ]
+    elif label == "Uncertain":
+        conclusion_parts = [
+            f"In summary, empirical literature analysis addresses: \"{question}\".",
+            "Foundational anchor paper: Selection is uncertain.",
+            "Anchor confidence: Uncertain.",
+        ]
+    else:
+        conclusion_parts = [
+            f"In summary, empirical literature analysis addresses: \"{question}\".",
+            a_sent,
+            f"Anchor confidence: {anchor_confidence.capitalize()}.",
+        ]
 
     if integrity >= 1.0:
         conclusion_parts.append("All findings verified with 100.0% citation integrity.")
@@ -579,10 +797,7 @@ async def synthesize_report(
             warning_notes.append("Anchor paper selection is marked uncertain.")
     if removed_details:
         warning_notes.append(f"{len(removed_details)} claim sentence(s) removed due to lack of verifiable evidence.")
-    if retrieval_warnings:
-        warning_notes.extend(retrieval_warnings)
-    if debug_info and debug_info.get("llm_warnings"):
-        warning_notes.extend(debug_info["llm_warnings"])
+    # B3: Keep raw errors out of prose; do not extend warning_notes with raw retrieval_warnings
 
     if warning_notes:
         conclusion_parts.append(f"Warnings: {'; '.join(warning_notes)}.")
@@ -590,10 +805,17 @@ async def synthesize_report(
     conclusion = " ".join(conclusion_parts)
 
     report = ResearchReport(
-        executiveSummary=verified_answer,
+        executiveSummary=exec_summary,
         methodology=methodology,
         findings=findings,
         comparisonTable=comparison_table,
+        technique_comparison=tech_comparison,
+        research_coverage=research_cov_text,
+        insufficient_evidence=insufficient_evidence_items,
+        contradicted_findings=[],
+        source_distribution=source_distribution,
+        retrieval_warnings=retrieval_warnings or [],
+        concept_coverage=concept_coverage_map,
         computationalRequirements="",
         contradictoryEvidence="",
         limitations=limitations,

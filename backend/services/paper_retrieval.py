@@ -19,10 +19,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
-import uuid
-
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from ..config import settings
 from ..models.schemas import Paper, ResearchDepth, ResearchSource
@@ -42,26 +39,46 @@ DB_PATH = Path(settings.DATABASE_URL.replace("sqlite:///", ""))
 
 # ─── Query Extraction Compatibility Helpers ────────────────────────────────────
 
+_STOP_WORDS = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "dare", "ought",
+    "what", "which", "who", "whom", "whose", "when", "where", "how",
+    "and", "but", "or", "nor", "for", "yet", "so", "of", "in", "on",
+    "at", "by", "from", "with", "about", "against", "between", "into",
+    "through", "during", "before", "after", "above", "below", "to", "up",
+    "down", "than", "that", "this", "these", "those", "i", "you", "he",
+    "she", "it", "we", "they", "them", "their", "its", "if",
+})
+
+GENERIC_QUERY_WORDS = frozenset({
+    "paper", "papers", "study", "studies", "approach", "approaches", "method", "methods",
+    "model", "models", "architecture", "architectures", "technique", "techniques",
+    "analysis", "overview", "survey", "review", "evaluation", "benchmark", "performance",
+    "research", "work", "investigation", "literature", "comparison", "comparative",
+    "introduction", "introducing", "proposed", "proposal", "recent", "current",
+    "state", "art", "sota", "system", "systems", "implementation", "results",
+})
+
+
+def is_generic_query(query: str) -> bool:
+    """Returns True if the query contains only stop words or generic academic terms."""
+    tokens = re.findall(r"[a-zA-Z0-9][-a-zA-Z0-9]*", query.lower())
+    meaningful = [t for t in tokens if t not in _STOP_WORDS and len(t) > 2]
+    if not meaningful:
+        return True
+    return all(t in GENERIC_QUERY_WORDS for t in meaningful)
+
+
 def _simple_keyword_query(question: str) -> str:
     """Strips stop words and extracts whole-word tokens without hardcoded filler."""
-    stop_words = {
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "could",
-        "should", "may", "might", "shall", "can", "need", "dare", "ought",
-        "what", "which", "who", "whom", "whose", "when", "where", "how",
-        "and", "but", "or", "nor", "for", "yet", "so", "of", "in", "on",
-        "at", "by", "from", "with", "about", "against", "between", "into",
-        "through", "during", "before", "after", "above", "below", "to", "up",
-        "down", "than", "that", "this", "these", "those", "i", "you", "he",
-        "she", "it", "we", "they", "them", "their", "its", "if",
-    }
     tokens = re.findall(r"[a-zA-Z0-9][-a-zA-Z0-9]*", question.lower())
-    meaningful = [t for t in tokens if t not in stop_words]
+    meaningful = [t for t in tokens if t not in _STOP_WORDS]
     return " ".join(meaningful) if meaningful else " ".join(tokens)
 
 
 async def generate_search_queries(question: str) -> list[str]:
-    """Generates search queries for a research question (LLM or keyword fallback)."""
+    """Generates search queries for a research question (LLM or planner facet fallback)."""
     is_configured = getattr(settings, "is_gemini_configured", False)
     if not is_configured and getattr(settings, "GEMINI_API_KEY", "") and settings.GEMINI_API_KEY != "your_gemini_api_key_here":
         is_configured = True
@@ -80,14 +97,42 @@ async def generate_search_queries(question: str) -> list[str]:
                 raw = re.sub(r"\s*```$", "", raw)
             queries = json.loads(raw)
             if isinstance(queries, list):
-                valid = [str(q).strip() for q in queries if str(q).strip()]
+                valid = [str(q).strip() for q in queries if str(q).strip() and not is_generic_query(str(q))]
                 if valid:
                     return valid[:3]
         except Exception as exc:
             logger.warning("[generate_search_queries] LLM query generation failed (%s), using keyword fallback", exc)
 
-    kw = _simple_keyword_query(question)
-    return [kw] if kw else [question]
+    # Planner facet-based fallback: topical queries derived from facets, deduplicated
+    from .query_planner import extract_question_facets
+    facets = extract_question_facets(question)
+    kw_query = _simple_keyword_query(question)
+    meaningful_q_tokens = [t for t in re.findall(r"[a-zA-Z0-9][-a-zA-Z0-9]*", question.lower()) if t not in _STOP_WORDS and t not in GENERIC_QUERY_WORDS]
+    core_topic = " ".join(meaningful_q_tokens[:3]) if meaningful_q_tokens else kw_query
+
+    candidate_queries: list[str] = []
+    for f in facets:
+        f_clean = re.sub(r"[^a-zA-Z0-9\s-]", "", f).strip()
+        if f_clean and not is_generic_query(f_clean):
+            if core_topic and core_topic.lower() not in f_clean.lower():
+                candidate_queries.append(f"{core_topic} {f_clean}".strip())
+            else:
+                candidate_queries.append(f_clean)
+
+    if kw_query and not is_generic_query(kw_query):
+        candidate_queries.append(kw_query)
+
+    deduped: list[str] = []
+    seen = set()
+    for q in candidate_queries:
+        q_norm = q.lower().strip()
+        if q_norm and q_norm not in seen and not is_generic_query(q):
+            seen.add(q_norm)
+            deduped.append(q)
+
+    if deduped:
+        return deduped[:4]
+    return [kw_query] if kw_query else [question]
 
 
 
@@ -205,11 +250,75 @@ _s2_lock = _s2_limiter._lock  # Backward compatibility alias
 _last_arxiv_call_time = 0.0
 _retrieval_errors: list[str] = []
 _s2_call_records: list[dict] = []
+_source_status: dict[str, str] = {
+    "arXiv": "PENDING",
+    "Semantic Scholar": "PENDING",
+    "OpenAlex": "PENDING",
+}
+_s2_429_count: int = 0
 
 
 def _record_retrieval_error(err: str) -> None:
-    if err and err not in _retrieval_errors:
-        _retrieval_errors.append(err)
+    if not err:
+        return
+    # Sanitize: strip query strings, raw HTTP codes, and raw syntax
+    clean = re.sub(r"for query ['\"].*?['\"]", "", err, flags=re.IGNORECASE)
+    clean = re.sub(r"querying ['\"].*?['\"]", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"HTTP\s*\d{3}", "service error", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"all:\".*?\"", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\b429\b", "rate limit", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if clean and clean not in _retrieval_errors:
+        _retrieval_errors.append(clean)
+
+
+def _record_s2_rate_limited() -> None:
+    global _s2_429_count
+    _s2_429_count += 1
+    _source_status["Semantic Scholar"] = "RATE_LIMITED"
+
+
+def get_s2_rate_limited_count() -> int:
+    return _s2_429_count
+
+
+def set_source_status(source: str, status: str) -> None:
+    _source_status[source] = status
+
+
+def get_source_status() -> dict[str, str]:
+    return dict(_source_status)
+
+
+def summarize_source_status() -> str:
+    """Returns a clean user-facing summary line of source statuses without raw HTTP or query text."""
+    statuses = get_source_status()
+    status_map = {
+        "RATE_LIMITED": "rate limited",
+        "ERROR": "unavailable",
+        "OK": "ok",
+        "PARTIAL": "partial results",
+        "PENDING": "ok",
+        "NO_RESULTS": "no results",
+    }
+    parts = []
+    for src in ["Semantic Scholar", "arXiv", "OpenAlex"]:
+        st = statuses.get(src, "PENDING")
+        desc = status_map.get(st, st.lower())
+        parts.append(f"{src}: {desc}")
+    return "; ".join(parts)
+
+
+def reset_retrieval_session() -> None:
+    global _retrieval_errors, _s2_call_records, _source_status, _s2_429_count
+    _retrieval_errors = []
+    _s2_call_records = []
+    _source_status = {
+        "arXiv": "PENDING",
+        "Semantic Scholar": "PENDING",
+        "OpenAlex": "PENDING",
+    }
+    _s2_429_count = 0
 
 
 def get_and_clear_retrieval_errors() -> list[str]:
@@ -243,6 +352,39 @@ def get_and_clear_s2_call_records() -> list[dict]:
     records = list(_s2_call_records)
     _s2_call_records = []
     return records
+
+
+def _format_arxiv_query_expr(phrase: str) -> str:
+    """Format academic search phrase for arXiv API using boolean all:term AND all:term."""
+    cleaned = re.sub(r'["\']', '', phrase).strip()
+    if not cleaned:
+        return ""
+    if ":" in cleaned:
+        return cleaned
+
+    lower_p = cleaned.lower()
+    if "pagedattention" in lower_p:
+        return 'all:PagedAttention'
+    if "flashattention" in lower_p:
+        return 'all:FlashAttention'
+    if "speculative decoding" in lower_p:
+        return 'all:speculative AND all:decoding'
+    if "kv cache" in lower_p or "kv-cache" in lower_p:
+        return 'all:KV AND all:cache'
+    if "quantization" in lower_p and ("weight-only" in lower_p or "weight only" in lower_p):
+        return 'all:weight AND all:quantization AND all:LLM'
+    if "quantization" in lower_p:
+        return 'all:quantization AND all:LLM'
+    if "pruning" in lower_p:
+        return 'all:pruning AND all:LLM'
+
+    stop_words = frozenset(["the", "a", "an", "is", "are", "for", "in", "on", "of", "and", "or", "to", "with", "what", "how", "terms"])
+    words = [w for w in re.findall(r'[a-zA-Z0-9\-]+', cleaned) if len(w) > 1 and w.lower() not in stop_words]
+    if not words:
+        return f'all:{cleaned}'
+    if len(words) <= 2:
+        return " AND ".join(f'all:{w}' for w in words)
+    return " AND ".join(f'all:{w}' for w in words[:3])
 
 
 async def _throttle_arxiv():
@@ -352,13 +494,11 @@ async def _fetch_arxiv_query(search_expr: str, max_results: int) -> list[Paper]:
                 _set_cached_response("arxiv", search_expr, [p.model_dump() for p in papers])
                 return papers
             else:
-                msg = f"arXiv HTTP {resp.status_code} for query '{search_expr[:50]}'"
-                logger.warning("[arXiv] %s", msg)
-                _record_retrieval_error(msg)
+                logger.warning("[arXiv] HTTP %d for query '%s'", resp.status_code, search_expr[:50])
+                _record_retrieval_error("arXiv service response error")
     except Exception as exc:
-        msg = f"arXiv error querying '{search_expr[:50]}': {exc}"
-        logger.warning("[arXiv] %s", msg)
-        _record_retrieval_error(msg)
+        logger.warning("[arXiv] arXiv error querying '%s': %s", search_expr[:50], exc)
+        _record_retrieval_error("arXiv service connection error")
 
     return []
 
@@ -397,10 +537,10 @@ async def _fetch_s2_with_retry(query: str, limit: int, headers: dict) -> list[Pa
                         is_authenticated = bool(settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
                         retry_after = resp.headers.get("Retry-After")
                         wait_sec = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() else 3.0
-                        msg = f"Semantic Scholar HTTP 429 rate limit for query '{query[:40]}'"
-                        logger.warning("[S2] %s. Retry-After: %.1fs (attempt %d/%d)", msg, wait_sec, attempt, max_attempts)
-                        _record_retrieval_error(msg)
-                        _record_s2_call(query, 429, 0, error=msg, duration_ms=dur_ms)
+                        logger.warning("[S2] Semantic Scholar HTTP 429 rate limit for query '%s'. Retry-After: %.1fs (attempt %d/%d)", query[:40], wait_sec, attempt, max_attempts)
+                        _record_retrieval_error("Semantic Scholar rate limit reached")
+                        _record_s2_rate_limited()
+                        _record_s2_call(query, 429, 0, error="Semantic Scholar rate limit reached", duration_ms=dur_ms)
                         _s2_limiter.penalize(wait_sec)
                         if not is_authenticated:
                             return []
@@ -408,18 +548,16 @@ async def _fetch_s2_with_retry(query: str, limit: int, headers: dict) -> list[Pa
                         continue
 
                     if resp.status_code >= 500:
-                        msg = f"Semantic Scholar HTTP {resp.status_code} server error for query '{query[:40]}'"
-                        logger.warning("[S2] %s (attempt %d/%d)", msg, attempt, max_attempts)
-                        _record_retrieval_error(msg)
-                        _record_s2_call(query, resp.status_code, 0, error=msg, duration_ms=dur_ms)
+                        logger.warning("[S2] Semantic Scholar HTTP %d server error for query '%s' (attempt %d/%d)", resp.status_code, query[:40], attempt, max_attempts)
+                        _record_retrieval_error("Semantic Scholar server error")
+                        _record_s2_call(query, resp.status_code, 0, error="Semantic Scholar server error", duration_ms=dur_ms)
                         await asyncio.sleep(2.0 * attempt)
                         continue
 
                     if resp.status_code != 200:
-                        msg = f"Semantic Scholar HTTP {resp.status_code} for query '{query[:40]}'"
-                        logger.warning("[S2] %s: %s", msg, resp.text[:100])
-                        _record_retrieval_error(msg)
-                        _record_s2_call(query, resp.status_code, 0, error=msg, duration_ms=dur_ms)
+                        logger.warning("[S2] Semantic Scholar HTTP %d for query '%s': %s", resp.status_code, query[:40], resp.text[:100])
+                        _record_retrieval_error("Semantic Scholar service error")
+                        _record_s2_call(query, resp.status_code, 0, error="Semantic Scholar service error", duration_ms=dur_ms)
                         return []
 
                     data = resp.json()
@@ -469,10 +607,9 @@ async def _fetch_s2_with_retry(query: str, limit: int, headers: dict) -> list[Pa
 
             except Exception as exc:
                 dur_ms = int((time.time() - t0) * 1000)
-                msg = f"Semantic Scholar network error for query '{query[:40]}': {exc}"
-                logger.warning("[S2] %s", msg)
-                _record_retrieval_error(msg)
-                _record_s2_call(query, 0, 0, error=msg, duration_ms=dur_ms)
+                logger.warning("[S2] Semantic Scholar network error for query '%s': %s", query[:40], exc)
+                _record_retrieval_error("Semantic Scholar network error")
+                _record_s2_call(query, 0, 0, error="Semantic Scholar network error", duration_ms=dur_ms)
                 if attempt < max_attempts:
                     await asyncio.sleep(2.0 * attempt)
                     continue
@@ -497,9 +634,8 @@ async def _fetch_semantic_scholar_query(query: str, limit: int) -> list[Paper]:
             _set_cached_response("semantic_scholar", query, [p.model_dump() for p in papers])
             return papers
     except Exception as exc:
-        msg = f"Semantic Scholar error querying '{query[:50]}': {exc}"
-        logger.warning("[S2] %s", msg)
-        _record_retrieval_error(msg)
+        logger.warning("[S2] Semantic Scholar error querying '%s': %s", query[:50], exc)
+        _record_retrieval_error("Semantic Scholar query error")
 
     return []
  
@@ -561,8 +697,10 @@ async def enrich_papers_with_s2(papers: list[Paper]) -> list[Paper]:
     if is_authenticated:
         headers["x-api-key"] = settings.SEMANTIC_SCHOLAR_API_KEY.strip()
 
-    batch_size = 500
+    batch_size = 100
     for i in range(0, len(all_ids), batch_size):
+        if i > 0:
+            await asyncio.sleep(1.0)
         batch_ids = all_ids[i : i + batch_size]
         async with _s2_limiter:
             t0 = time.time()
@@ -580,10 +718,10 @@ async def enrich_papers_with_s2(papers: list[Paper]) -> list[Paper]:
                     if resp.status_code == 429:
                         retry_after = resp.headers.get("Retry-After")
                         wait_sec = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() else 3.0
-                        msg = f"Semantic Scholar batch rate limited (HTTP 429 for {len(batch_ids)} ids)"
-                        logger.warning("[S2-Batch] %s. Retry-After: %.1fs", msg, wait_sec)
-                        _record_s2_call(f"batch:{len(batch_ids)}", 429, 0, error=msg, duration_ms=dur_ms)
-                        _record_retrieval_error(msg)
+                        logger.warning("[S2-Batch] Semantic Scholar batch rate limited (429 for %d ids). Retry-After: %.1fs", len(batch_ids), wait_sec)
+                        _record_s2_rate_limited()
+                        _record_s2_call(f"batch:{len(batch_ids)}", 429, 0, error="Semantic Scholar batch rate limited", duration_ms=dur_ms)
+                        _record_retrieval_error("Semantic Scholar batch rate limited")
                         _s2_limiter.penalize(wait_sec)
                         if not is_authenticated:
                             logger.info("[S2-Batch] Unauthenticated S2 batch rate limited; continuing with OpenAlex enrichment.")
@@ -876,13 +1014,11 @@ async def _fetch_openalex_query(query: str, limit: int = 50) -> list[Paper]:
                     _set_cached_response("openalex", clean_q, [p.model_dump() for p in papers])
                 return papers
             else:
-                msg = f"OpenAlex HTTP {resp.status_code} for query '{clean_q[:50]}'"
-                logger.warning("[OpenAlex] %s", msg)
-                _record_retrieval_error(msg)
+                logger.warning("[OpenAlex] HTTP %d for query '%s'", resp.status_code, clean_q[:50])
+                _record_retrieval_error("OpenAlex service error")
     except Exception as exc:
-        msg = f"OpenAlex error querying '{clean_q[:50]}': {exc}"
-        logger.warning("[OpenAlex] %s", msg)
-        _record_retrieval_error(msg)
+        logger.warning("[OpenAlex] error querying '%s': %s", clean_q[:50], exc)
+        _record_retrieval_error("OpenAlex connection error")
 
     return []
 
@@ -1044,12 +1180,17 @@ async def retrieve_candidate_papers(
         for q in plan.get("queries", []):
             phrase = re.sub(r'["\']', '', q).strip()
             if phrase:
-                arxiv_tasks.append(_fetch_arxiv_query(f'all:"{phrase}"', fetch_limit))
+                query_expr = _format_arxiv_query_expr(phrase)
+                if query_expr:
+                    arxiv_tasks.append(_fetch_arxiv_query(query_expr, fetch_limit))
         if arxiv_tasks:
             arxiv_results = await asyncio.gather(*arxiv_tasks, return_exceptions=True)
             for r in arxiv_results:
                 if isinstance(r, list):
                     arxiv_candidates.extend(r)
+        set_source_status("arXiv", "SUCCESS" if arxiv_candidates else "NO_RESULTS")
+    else:
+        set_source_status("arXiv", "NOT_USED")
 
     # 2. OpenAlex queries (sorted by cited_by_count:desc, top 50 per query)
     if (ResearchSource.OPENALEX in sources or "OpenAlex" in source_values) and getattr(settings, "OPENALEX_ENABLED", True):
@@ -1070,6 +1211,9 @@ async def retrieve_candidate_papers(
             for r in openalex_results:
                 if isinstance(r, list):
                     openalex_candidates.extend(r)
+        set_source_status("OpenAlex", "SUCCESS" if openalex_candidates else "NO_RESULTS")
+    else:
+        set_source_status("OpenAlex", "NOT_USED")
 
     # 3. Semantic Scholar queries (one at a time, sequential, max 6 if authenticated, 3 if unauthenticated)
     if (ResearchSource.SEMANTIC_SCHOLAR in sources or "Semantic Scholar" in source_values) and getattr(settings, "SEMANTIC_SCHOLAR_ENABLED", True):
@@ -1095,17 +1239,28 @@ async def retrieve_candidate_papers(
                 if s2_res:
                     s2_candidates.extend(s2_res)
             except Exception as exc:
-                msg = f"Semantic Scholar call failed for '{s2_q[:40]}': {exc}"
-                logger.warning("[S2] %s", msg)
-                _record_retrieval_error(msg)
+                logger.warning("[S2] Semantic Scholar call failed for '%s': %s", s2_q[:40], exc)
+                _record_retrieval_error("Semantic Scholar call failed")
+
+        if get_s2_rate_limited_count() > 0:
+            set_source_status("Semantic Scholar", "RATE_LIMITED")
+            warn_msg = "Semantic Scholar rate limit reached for some queries; results may have incomplete source coverage."
+            _record_retrieval_error(warn_msg)
+        elif s2_candidates:
+            set_source_status("Semantic Scholar", "SUCCESS")
+        else:
+            set_source_status("Semantic Scholar", "NO_RESULTS")
+    else:
+        set_source_status("Semantic Scholar", "NOT_USED")
 
     # Log candidates per source and how many came from citation-sorted path
     logger.info(
-        "[Retrieval] Candidates per source: arXiv=%d, Semantic Scholar=%d, OpenAlex=%d (citation-sorted: %d)",
+        "[Retrieval] Candidates per source: arXiv=%d, Semantic Scholar=%d, OpenAlex=%d (citation-sorted: %d), source_status=%s",
         len(arxiv_candidates),
         len(s2_candidates),
         len(openalex_candidates),
         len(openalex_candidates),
+        get_source_status(),
     )
 
     # Merge into candidate pool BEFORE dedupe and enrichment

@@ -75,13 +75,15 @@ os.environ.setdefault("NLI_MODEL", "cross-encoder/nli-deberta-v3-small")
 os.environ.setdefault("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 os.environ.setdefault("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-# Pick LLM provider: prioritize Gemini on Cloud if key is set, otherwise OpenAI
-if os.getenv("GEMINI_API_KEY") and os.getenv("GEMINI_API_KEY") != "your_gemini_api_key_here":
-    os.environ.setdefault("LLM_PROVIDER", "gemini")
-elif os.getenv("OPENAI_API_KEY") and os.getenv("OPENAI_API_KEY") != "your_openai_api_key_here":
+# Pick LLM provider: prioritize OpenAI if configured, otherwise Gemini if real key exists
+_openai_key = os.getenv("OPENAI_API_KEY", "")
+_gemini_key = os.getenv("GEMINI_API_KEY", "")
+if _openai_key and _openai_key.strip() not in ("your_openai_api_key_here", "xxx", ""):
     os.environ.setdefault("LLM_PROVIDER", "openai")
-else:
+elif _gemini_key and _gemini_key.strip() not in ("your_gemini_api_key_here", "xxx", ""):
     os.environ.setdefault("LLM_PROVIDER", "gemini")
+else:
+    os.environ.setdefault("LLM_PROVIDER", "openai")
 
 # Writable SQLite DB path (works locally and in ephemeral cloud container)
 _db_file = os.getenv("STREAMLIT_DB_PATH", str(_PROJECT_ROOT / "researchlens_st.db"))
@@ -108,8 +110,7 @@ from backend.services.research_workflow import (
     run_research_pipeline,
 )
 
-# Apply conservative depth counts for Streamlit Cloud
-settings.DEPTH_COUNTS = {"Quick": 3, "Standard": 6, "Deep": 12}
+# Default depth counts and worker limits follow backend.config.settings
 settings.MAX_PDF_WORKERS = 2
 
 # ── 4. Concurrency Guard & Model Caching ──────────────────────────────────────
@@ -171,11 +172,11 @@ def render_verdict_badge(verdict: str) -> str:
     """Return styled HTML badge for NLI verdicts."""
     v = str(verdict).lower()
     if v in ("entails", "verified"):
-        return '<span style="background-color:#065F46;color:#D1FAE5;padding:3px 8px;border-radius:12px;font-size:0.75rem;font-weight:600;">✓ ENTAILS</span>'
+        return '<span style="background-color:#065F46;color:#D1FAE5;padding:3px 8px;border-radius:12px;font-size:0.75rem;font-weight:600;">ENTAILS</span>'
     elif v in ("neutral", "partially_supported"):
         return '<span style="background-color:#92400E;color:#FEF3C7;padding:3px 8px;border-radius:12px;font-size:0.75rem;font-weight:600;">~ NEUTRAL</span>'
     elif v in ("contradicts", "contradicted"):
-        return '<span style="background-color:#991B1B;color:#FEE2E2;padding:3px 8px;border-radius:12px;font-size:0.75rem;font-weight:600;">✗ CONTRADICTS</span>'
+        return '<span style="background-color:#991B1B;color:#FEE2E2;padding:3px 8px;border-radius:12px;font-size:0.75rem;font-weight:600;">CONTRADICTS</span>'
     else:
         return '<span style="background-color:#4B5563;color:#F3F4F6;padding:3px 8px;border-radius:12px;font-size:0.75rem;font-weight:600;">? UNSUPPORTED</span>'
 
@@ -208,13 +209,16 @@ def build_markdown_report(inv: ResearchInvestigation) -> str:
         lines.extend([
             "## Methodological Comparison",
             "",
-            "| Model / Architecture | Dataset | Performance / Metric | Venue / Year | Citations |",
-            "| :--- | :--- | :--- | :--- | :--- |",
+            "| Paper / Model | Year | Venue | Citations |",
+            "| :--- | :--- | :--- | :--- |",
         ])
         for row in rep.comparisonTable:
-            perf = row.f1Score if row.f1Score != "Not extracted" else row.mapScore
+            p_name = row.title or row.model
+            p_year = row.year or "Not extracted"
+            p_venue = row.venue or "Not extracted"
+            p_cites = row.citationCount or "Not extracted"
             lines.append(
-                f"| **{row.model}** | {row.dataset} | {perf} | {row.venue or ''} {row.year or ''} | {row.citationCount or ''} |"
+                f"| **{p_name}** | {p_year} | {p_venue} | {p_cites} |"
             )
         lines.append("")
 
@@ -264,14 +268,14 @@ def build_html_report(inv: ResearchInvestigation) -> str:
     comp_html = ""
     if rep.comparisonTable:
         rows = "".join([
-            f"<tr><td><strong>{r.model}</strong></td><td>{r.dataset}</td><td>{r.f1Score if r.f1Score != 'Not extracted' else r.mapScore}</td><td>{r.venue or ''} {r.year or ''}</td><td>{r.citationCount or ''}</td></tr>"
+            f"<tr><td><strong>{r.title or r.model}</strong></td><td>{r.year or 'Not extracted'}</td><td>{r.venue or 'Not extracted'}</td><td>{r.citationCount or 'Not extracted'}</td></tr>"
             for r in rep.comparisonTable
         ])
         comp_html = f"""
         <h2>Methodological Comparison</h2>
         <table border="1" cellpadding="8" cellspacing="0" style="width:100%; border-collapse:collapse; margin-bottom:24px; font-size:0.9rem;">
           <tr style="background:#f1f5f9; text-align:left;">
-            <th>Model / Approach</th><th>Dataset</th><th>Metric</th><th>Venue / Year</th><th>Citations</th>
+            <th>Paper / Model</th><th>Year</th><th>Venue</th><th>Citations</th>
           </tr>
           {rows}
         </table>
@@ -345,7 +349,7 @@ def build_html_report(inv: ResearchInvestigation) -> str:
   </style>
 </head>
 <body>
-  <h1>🔬 {inv.question}</h1>
+  <h1>{inv.question}</h1>
   <div class="meta-box">
     <strong>Date:</strong> {created} &nbsp;|&nbsp;
     <strong>Confidence:</strong> {inv.research_confidence} &nbsp;|&nbsp;
@@ -363,210 +367,7 @@ def build_html_report(inv: ResearchInvestigation) -> str:
 </html>"""
 
 
-def build_pdf_report(inv: ResearchInvestigation) -> bytes:
-    """Construct an academic-quality, publication-ready PDF document using PyMuPDF."""
-    try:
-        import fitz
-    except ImportError:
-        logger.error("PyMuPDF (fitz) is not installed; cannot generate PDF.")
-        return b""
-
-    doc = fitz.open()
-    page_w, page_h = 595.3, 841.9  # A4 size
-    margin = 50.0
-    content_w = page_w - 2 * margin
-    content_bottom = page_h - margin
-
-    def add_blank_page():
-        return doc.new_page(width=page_w, height=page_h)
-
-    current_page = add_blank_page()
-    y_cursor = margin
-
-    def check_space(needed_h: float):
-        nonlocal current_page, y_cursor
-        if y_cursor + needed_h > content_bottom - 24:
-            current_page = add_blank_page()
-            y_cursor = margin
-
-    # Header Card on Page 1
-    banner_h = 80.0
-    current_page.draw_rect(
-        fitz.Rect(margin, y_cursor, margin + content_w, y_cursor + banner_h),
-        color=None,
-        fill=(0.06, 0.10, 0.18),  # Deep navy / slate
-    )
-    current_page.insert_text(
-        (margin + 16, y_cursor + 24),
-        "ResearchLens — Autonomous Academic Synthesis",
-        fontsize=13,
-        fontname="helv",
-        color=(1.0, 1.0, 1.0),
-    )
-    q_str = inv.question if len(inv.question) < 85 else inv.question[:82] + "..."
-    current_page.insert_text(
-        (margin + 16, y_cursor + 44),
-        f"Research Question: {q_str}",
-        fontsize=9.0,
-        fontname="helv",
-        color=(0.85, 0.90, 0.98),
-    )
-    created_str = inv.createdAt[:10] if inv.createdAt else datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    meta_line = (
-        f"Date: {created_str}   |   Confidence: {inv.research_confidence}   |   "
-        f"Citation Integrity: {inv.citation_integrity}%   |   Papers Analyzed: {inv.papersAnalyzed}"
-    )
-    current_page.insert_text(
-        (margin + 16, y_cursor + 63),
-        meta_line,
-        fontsize=8.0,
-        fontname="helv",
-        color=(0.60, 0.72, 0.88),
-    )
-    y_cursor += banner_h + 20.0
-
-    if not inv.report:
-        rect = fitz.Rect(margin, y_cursor, margin + content_w, content_bottom)
-        current_page.insert_textbox(rect, f"Status: {inv.status}\n\nNo synthesized report generated.", fontsize=10)
-        return doc.tobytes()
-
-    rep = inv.report
-
-    def render_heading(title: str, level: int = 1):
-        nonlocal current_page, y_cursor
-        check_space(34.0 if level == 1 else 26.0)
-        font_size = 12.5 if level == 1 else 10.5
-        current_page.insert_text(
-            (margin, y_cursor + (13 if level == 1 else 10)),
-            title,
-            fontsize=font_size,
-            fontname="helv",
-            color=(0.06, 0.10, 0.18) if level == 1 else (0.18, 0.24, 0.36),
-        )
-        if level == 1:
-            current_page.draw_line(
-                fitz.Point(margin, y_cursor + 18),
-                fitz.Point(margin + content_w, y_cursor + 18),
-                color=(0.82, 0.86, 0.92),
-                width=0.8,
-            )
-            y_cursor += 28.0
-        else:
-            y_cursor += 20.0
-
-    def render_paragraph(text: str):
-        nonlocal current_page, y_cursor
-        if not text:
-            return
-        words = text.split()
-        para_chunk = ""
-        for word in words:
-            candidate = f"{para_chunk} {word}".strip()
-            rect = fitz.Rect(margin, y_cursor, margin + content_w, content_bottom)
-            unused = current_page.insert_textbox(rect, candidate, fontsize=9.0, fontname="helv")
-            if unused < 0:
-                if para_chunk:
-                    rect_flush = fitz.Rect(margin, y_cursor, margin + content_w, content_bottom)
-                    unused_flush = current_page.insert_textbox(rect_flush, para_chunk, fontsize=9.0, fontname="helv")
-                    y_cursor += max(0, rect_flush.height - unused_flush) + 4.0
-                current_page = add_blank_page()
-                y_cursor = margin
-                para_chunk = word
-            else:
-                para_chunk = candidate
-        if para_chunk:
-            rect = fitz.Rect(margin, y_cursor, margin + content_w, content_bottom)
-            unused = current_page.insert_textbox(rect, para_chunk, fontsize=9.0, fontname="helv")
-            if unused >= 0:
-                y_cursor += max(0, rect.height - unused) + 8.0
-            else:
-                current_page = add_blank_page()
-                y_cursor = margin
-                rect = fitz.Rect(margin, y_cursor, margin + content_w, content_bottom)
-                unused = current_page.insert_textbox(rect, para_chunk, fontsize=9.0, fontname="helv")
-                y_cursor += max(0, rect.height - unused) + 8.0
-
-    # 1. Executive Summary
-    if rep.executiveSummary:
-        render_heading("Executive Summary")
-        render_paragraph(rep.executiveSummary)
-
-    # 2. Methodological Comparison Table
-    if rep.comparisonTable:
-        render_heading("Methodological Comparison")
-        col_widths = [110.0, 110.0, 95.0, 95.0, 77.0]
-        row_h = 18.0
-        headers = ["Model / Approach", "Dataset", "Metric", "Venue / Year", "Citations"]
-        check_space(row_h * (len(rep.comparisonTable) + 2))
-        x = margin
-        for idx, h_text in enumerate(headers):
-            cell_w = col_widths[idx]
-            current_page.draw_rect(fitz.Rect(x, y_cursor, x + cell_w, y_cursor + row_h), color=(0.8, 0.85, 0.9), fill=(0.94, 0.96, 0.98))
-            current_page.insert_text((x + 4, y_cursor + 12), h_text, fontsize=7.5, fontname="helv", color=(0.15, 0.2, 0.3))
-            x += cell_w
-        y_cursor += row_h
-
-        for r_idx, row in enumerate(rep.comparisonTable):
-            check_space(row_h + 4)
-            x = margin
-            perf = row.f1Score if row.f1Score != "Not extracted" else row.mapScore
-            vals = [
-                str(row.model)[:22],
-                str(row.dataset)[:22],
-                str(perf)[:18],
-                f"{row.venue or ''} {row.year or ''}"[:18].strip(),
-                str(row.citationCount or "")[:12],
-            ]
-            bg_col = (1.0, 1.0, 1.0) if r_idx % 2 == 0 else (0.98, 0.98, 0.99)
-            for idx, val_text in enumerate(vals):
-                cell_w = col_widths[idx]
-                current_page.draw_rect(fitz.Rect(x, y_cursor, x + cell_w, y_cursor + row_h), color=(0.85, 0.88, 0.92), fill=bg_col)
-                current_page.insert_text((x + 4, y_cursor + 12), val_text, fontsize=7.5, fontname="helv", color=(0.2, 0.25, 0.35))
-                x += cell_w
-            y_cursor += row_h
-        y_cursor += 12.0
-
-    # 3. Detailed Research Findings
-    if rep.findings:
-        render_heading("Detailed Research Findings")
-        for sec in rep.findings:
-            render_heading(sec.sectionTitle, level=2)
-            for p in sec.paragraphs:
-                cite_str = ""
-                if p.citations:
-                    cite_str = " " + " ".join([f"[{c.badgeNumber}]" for c in p.citations])
-                render_paragraph(p.text + cite_str)
-
-    # 4. Limitations
-    if rep.limitations:
-        render_heading("Limitations & Boundary Conditions")
-        for lim in rep.limitations:
-            render_paragraph(f"• {lim}")
-
-    # 5. Conclusion
-    if rep.conclusion:
-        render_heading("Conclusion")
-        render_paragraph(rep.conclusion)
-
-    # 6. References
-    if rep.references:
-        render_heading("References")
-        for idx, ref in enumerate(rep.references, 1):
-            authors_fmt = ", ".join(ref.authors[:3]) + (" et al." if len(ref.authors) > 3 else "")
-            ref_line = f"[{idx}] {ref.title} ({ref.publicationYear}). {authors_fmt}. {ref.journalConference or ref.source}."
-            if ref.doi:
-                ref_line += f" DOI: {ref.doi}"
-            render_paragraph(ref_line)
-
-    # Running Footer on all pages
-    total_pages = len(doc)
-    for p_no in range(total_pages):
-        p = doc[p_no]
-        footer_text = f"ResearchLens Autonomous Academic Assistant   |   Page {p_no + 1} of {total_pages}"
-        p.draw_line(fitz.Point(margin, page_h - 32), fitz.Point(page_w - margin, page_h - 32), color=(0.88, 0.90, 0.94), width=0.5)
-        p.insert_text((margin, page_h - 20), footer_text, fontsize=7.5, fontname="helv", color=(0.55, 0.60, 0.68))
-
-    return doc.tobytes()
+from backend.services.pdf_report import build_pdf_report  # noqa: E402
 
 
 # ── 6. Robust Pipeline Execution Thread ───────────────────────────────────────
@@ -604,8 +405,8 @@ def _run_pipeline_worker(job_id: str) -> None:
 # ── 7. Page Setup & Sidebar ───────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="ResearchLens — Autonomous Academic Synthesis",
-    page_icon="🔬",
+    page_title="ResearchLens - Autonomous Academic Synthesis",
+    page_icon=None,
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -618,19 +419,77 @@ st.markdown(
         background-color: #1E293B;
         border: 1px solid #334155;
         border-radius: 8px;
-        padding: 12px 16px;
+        padding: 12px 14px;
         margin-bottom: 8px;
+        min-height: 84px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
     }
     .metric-value {
-        font-size: 1.5rem;
+        font-size: 1.35rem;
         font-weight: 700;
         color: #F8FAFC;
+        line-height: 1.2;
     }
     .metric-label {
-        font-size: 0.8rem;
+        font-size: 0.72rem;
         color: #94A3B8;
         text-transform: uppercase;
         letter-spacing: 0.05em;
+        margin-bottom: 4px;
+        font-weight: 600;
+    }
+    .metric-badge {
+        display: inline-block;
+        padding: 3px 8px;
+        border-radius: 6px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        width: fit-content;
+        line-height: 1.3;
+    }
+    .badge-status-completed {
+        background-color: rgba(16, 185, 129, 0.2);
+        color: #34D399;
+        border: 1px solid #059669;
+    }
+    .badge-status-completed_with_warnings {
+        background-color: rgba(245, 158, 11, 0.2);
+        color: #FBBF24;
+        border: 1px solid #D97706;
+    }
+    .badge-status-insufficient_evidence, .badge-status-failed {
+        background-color: rgba(239, 68, 68, 0.2);
+        color: #F87171;
+        border: 1px solid #DC2626;
+    }
+    .badge-status-in_progress {
+        background-color: rgba(59, 130, 246, 0.2);
+        color: #60A5FA;
+        border: 1px solid #2563EB;
+    }
+    .badge-conf-high {
+        background-color: rgba(16, 185, 129, 0.2);
+        color: #34D399;
+        border: 1px solid #059669;
+    }
+    .badge-conf-medium {
+        background-color: rgba(245, 158, 11, 0.2);
+        color: #FBBF24;
+        border: 1px solid #D97706;
+    }
+    .badge-conf-low {
+        background-color: rgba(239, 68, 68, 0.2);
+        color: #F87171;
+        border: 1px solid #DC2626;
+    }
+    .badge-conf-none {
+        background-color: rgba(107, 114, 128, 0.2);
+        color: #9CA3AF;
+        border: 1px solid #4B5563;
     }
     .stProgress > div > div > div > div {
         background-color: #2563EB;
@@ -642,16 +501,16 @@ st.markdown(
 
 # ── Sidebar Controls ──────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("🔬 ResearchLens")
+    st.title("ResearchLens")
     st.caption("Autonomous Academic Research Synthesis")
     st.divider()
 
-    st.subheader("⚙️ Investigation Parameters")
+    st.subheader("Investigation Parameters")
     depth_choice = st.radio(
         "Research Depth",
         options=["Quick", "Standard", "Deep"],
         index=0,
-        help="Quick retrieves 3-4 papers (recommended for Community Cloud). Deep analyzes up to 12 papers.",
+        help=f"Quick analyzes up to {settings.DEPTH_COUNTS.get('Quick', 6)} papers, Standard up to {settings.DEPTH_COUNTS.get('Standard', 12)}, Deep up to {settings.DEPTH_COUNTS.get('Deep', 24)}.",
     )
 
     sources_selected = st.multiselect(
@@ -664,16 +523,16 @@ with st.sidebar:
     st.divider()
 
     # Read-only active system configuration
-    st.subheader("🤖 Engine Configuration")
+    st.subheader("Engine Configuration")
     active_provider = settings.LLM_PROVIDER.title()
     active_model = settings.GEMINI_MODEL if settings.LLM_PROVIDER.lower() == "gemini" else settings.OPENAI_MODEL
     llm_ready = settings.is_llm_configured
 
     st.markdown(f"**LLM Provider:** `{active_provider}` ({active_model})")
     if llm_ready:
-        st.markdown("**LLM Status:** 🟢 `Ready`")
+        st.markdown("**LLM Status:** `Ready`")
     else:
-        st.markdown("**LLM Status:** 🔴 `Missing API Key`")
+        st.markdown("**LLM Status:** `Missing API Key`")
 
     st.markdown(f"**NLI Model:** `{settings.NLI_MODEL.split('/')[-1]}`")
     st.markdown(f"**Embedding:** `{settings.EMBEDDING_MODEL.split('/')[-1]}`")
@@ -681,19 +540,22 @@ with st.sidebar:
 
     # Memory Usage Telemetry
     mem_mb = get_current_memory_mb()
-    mem_color = "green" if mem_mb < 1800 else ("orange" if mem_mb < 2400 else "red")
-    st.markdown(f"**Process RAM:** :{mem_color}[{mem_mb:.1f} MB / 2700 MB]")
+    mem_color_hex = "#34D399" if mem_mb < 1800 else ("#FBBF24" if mem_mb < 2400 else "#F87171")
+    st.markdown(
+        f"**Process RAM:** <span style='color:{mem_color_hex};font-weight:600;'>{mem_mb:.1f} MB / 2700 MB</span>",
+        unsafe_allow_html=True,
+    )
 
     st.divider()
     st.info(
-        "💡 **Notice:** Storage on Streamlit Community Cloud is ephemeral. Investigation history may be reset when the container hibernates."
+        "**Notice:** Storage on Streamlit Community Cloud is ephemeral. Investigation history may be reset when the container hibernates."
     )
 
 
 # ── 8. Main Application Interface ─────────────────────────────────────────────
 
 # Navigation Tabs
-tab_research, tab_history = st.tabs(["🔬 Research Workspace", "📜 Investigation History"])
+tab_research, tab_history = st.tabs(["Research Workspace", "Investigation History"])
 
 with tab_research:
     st.header("Autonomous Academic Literature Synthesis")
@@ -714,7 +576,13 @@ with tab_research:
 
     col_btn, col_clear = st.columns([3, 1])
     with col_btn:
-        run_clicked = st.button("🚀 Run Research Investigation", type="primary", use_container_width=True)
+        run_disabled = _PIPELINE_LOCK.locked()
+        run_clicked = st.button(
+            "Run Research Investigation",
+            type="primary",
+            use_container_width=True,
+            disabled=run_disabled,
+        )
     with col_clear:
         if st.button("Clear / Reset", use_container_width=True):
             st.session_state.pop("current_job_id", None)
@@ -739,7 +607,7 @@ with tab_research:
             st.stop()
 
         if _PIPELINE_LOCK.locked():
-            st.warning("⚠️ Another research investigation is currently executing in memory. Please wait for it to complete.")
+            st.warning("Another research investigation is currently executing in memory. Please wait for it to complete.")
             st.stop()
 
         # Create new ResearchJob row in SQLite
@@ -755,7 +623,7 @@ with tab_research:
                 depth=depth_choice,
                 sources=json.dumps(sources_selected),
                 status="in_progress",
-                total_papers=settings.DEPTH_COUNTS.get(depth_choice, 3),
+                total_papers=settings.DEPTH_COUNTS.get(depth_choice, 6),
                 created_at=now,
                 updated_at=now,
             )
@@ -780,7 +648,7 @@ with tab_research:
         worker_thread.start()
 
         # Poll status with st.status
-        with st.status("🔬 Conducting Autonomous Research Investigation...", expanded=True) as status_box:
+        with st.status("Conducting Autonomous Research Investigation...", expanded=True) as status_box:
             step_container = st.empty()
             progress_bar = st.progress(0.0)
 
@@ -818,13 +686,13 @@ with tab_research:
                     s_desc = s.get("description", "")
 
                     if s_status == "completed":
-                        lines.append(f"✅ **{s_name}**: Completed")
+                        lines.append(f"[Completed] **{s_name}**")
                     elif s_status == "active":
-                        lines.append(f"🔄 **{s_name}**: *In progress... ({s_desc})*")
+                        lines.append(f"[In Progress] **{s_name}**: *{s_desc}*")
                     elif s_status == "failed":
-                        lines.append(f"❌ **{s_name}**: Failed")
+                        lines.append(f"[Failed] **{s_name}**")
                     else:
-                        lines.append(f"⏳ **{s_name}**: Pending")
+                        lines.append(f"[Pending] **{s_name}**")
 
                 step_container.markdown("\n\n".join(lines))
 
@@ -832,7 +700,7 @@ with tab_research:
                 if current_status in ("completed", "completed_with_warnings"):
                     dur = int(time.time() - start_poll_time)
                     status_box.update(
-                        label=f"🎉 Research Investigation Completed in {dur}s!",
+                        label=f"Research Investigation Completed in {dur}s!",
                         state="complete",
                         expanded=False,
                     )
@@ -840,7 +708,7 @@ with tab_research:
                     break
                 elif current_status == "insufficient_evidence":
                     status_box.update(
-                        label="⚠️ Investigation Completed: Insufficient Corroborating Evidence",
+                        label="Investigation Completed: Insufficient Corroborating Evidence",
                         state="error",
                         expanded=True,
                     )
@@ -849,7 +717,7 @@ with tab_research:
                 elif current_status == "failed":
                     fail_msg = current_job.failure_reason or current_job.error_message or "Unknown failure"
                     status_box.update(
-                        label=f"❌ Pipeline Execution Failed: {fail_msg}",
+                        label=f"Pipeline Execution Failed: {fail_msg}",
                         state="error",
                         expanded=True,
                     )
@@ -858,7 +726,7 @@ with tab_research:
 
                 # Safety check if thread died unexpectedly
                 if not worker_thread.is_alive() and current_status == "in_progress":
-                    status_box.update(label="❌ Worker thread terminated unexpectedly.", state="error", expanded=True)
+                    status_box.update(label="Worker thread terminated unexpectedly.", state="error", expanded=True)
                     st.session_state["current_job_id"] = new_job_id
                     break
 
@@ -884,29 +752,42 @@ with tab_research:
             st.divider()
 
             # Investigation Header Banner
-            status_colors = {
-                "completed": "green",
-                "completed_with_warnings": "orange",
-                "insufficient_evidence": "red",
-                "failed": "red",
-            }
-            status_color = status_colors.get(investigation.status, "gray")
+            def _status_badge_info(status: str) -> tuple[str, str]:
+                s = (status or "").lower()
+                mapping = {
+                    "completed": ("COMPLETED", "badge-status-completed"),
+                    "completed_with_warnings": ("VERIFIED (WARNS)", "badge-status-completed_with_warnings"),
+                    "insufficient_evidence": ("INSUFFICIENT", "badge-status-insufficient_evidence"),
+                    "failed": ("FAILED", "badge-status-failed"),
+                    "in_progress": ("IN PROGRESS", "badge-status-in_progress"),
+                }
+                return mapping.get(s, (status.upper().replace("_", " "), "badge-status-in_progress"))
 
-            conf_colors = {"HIGH": "green", "MEDIUM": "orange", "LOW": "red"}
-            conf_color = conf_colors.get(investigation.research_confidence, "gray")
+            def _conf_badge_info(conf: str) -> tuple[str, str]:
+                c = (conf or "NONE").upper()
+                mapping = {
+                    "HIGH": ("HIGH", "badge-conf-high"),
+                    "MEDIUM": ("MEDIUM", "badge-conf-medium"),
+                    "LOW": ("LOW", "badge-conf-low"),
+                    "NONE": ("NONE", "badge-conf-none"),
+                }
+                return mapping.get(c, (c, "badge-conf-none"))
 
-            st.markdown(f"### 📋 Investigation: *{investigation.question}*")
+            status_text, status_cls = _status_badge_info(investigation.status)
+            conf_text, conf_cls = _conf_badge_info(investigation.research_confidence)
+
+            st.markdown(f"### Investigation: *{investigation.question}*")
 
             # Metrics Row
             m1, m2, m3, m4, m5 = st.columns(5)
             with m1:
                 st.markdown(
-                    f'<div class="metric-card"><div class="metric-label">Status</div><div class="metric-value">:{status_color}[{investigation.status.upper()}]</div></div>',
+                    f'<div class="metric-card"><div class="metric-label">Status</div><div><span class="metric-badge {status_cls}">{status_text}</span></div></div>',
                     unsafe_allow_html=True,
                 )
             with m2:
                 st.markdown(
-                    f'<div class="metric-card"><div class="metric-label">Confidence</div><div class="metric-value">:{conf_color}[{investigation.research_confidence}]</div></div>',
+                    f'<div class="metric-card"><div class="metric-label">Confidence</div><div><span class="metric-badge {conf_cls}">{conf_text}</span></div></div>',
                     unsafe_allow_html=True,
                 )
             with m3:
@@ -916,14 +797,36 @@ with tab_research:
                 )
             with m4:
                 st.markdown(
-                    f'<div class="metric-card"><div class="metric-label">Verified Claims</div><div class="metric-value">{investigation.verifiedClaims} <span style="font-size:1rem;color:#94A3B8;">/ {investigation.evidenceItems}</span></div></div>',
+                    f'<div class="metric-card"><div class="metric-label">Verified Claims</div><div class="metric-value">{investigation.verifiedClaims} <span style="font-size:0.95rem;color:#94A3B8;font-weight:400;margin-left:4px;">/ {investigation.evidenceItems}</span></div></div>',
                     unsafe_allow_html=True,
                 )
             with m5:
                 st.markdown(
-                    f'<div class="metric-card"><div class="metric-label">Papers / Passages</div><div class="metric-value">{investigation.papersAnalyzed} <span style="font-size:1rem;color:#94A3B8;">/ {investigation.passages_total}</span></div></div>',
+                    f'<div class="metric-card"><div class="metric-label">Papers / Passages</div><div class="metric-value">{investigation.papersAnalyzed} <span style="font-size:0.95rem;color:#94A3B8;font-weight:400;margin-left:4px;">/ {investigation.passages_total}</span></div></div>',
                     unsafe_allow_html=True,
                 )
+
+            # Secondary Coverage & Depth Indicators (Phase C)
+            sub_metrics = []
+            ev_papers_val = getattr(investigation, "evidence_bearing_papers", None)
+            rel_val = getattr(investigation, "relevant_papers", None)
+            depth_val = getattr(investigation, "research_depth", None)
+            cov_val = getattr(investigation, "evidence_coverage", None)
+            conc_cov = getattr(investigation, "concept_coverage", {}) or {}
+
+            if ev_papers_val is not None:
+                sub_metrics.append(f"**Evidence-Bearing Papers:** {ev_papers_val}")
+            if rel_val is not None:
+                sub_metrics.append(f"**Relevant Papers Screened:** {rel_val}")
+            if conc_cov:
+                found_conc = sum(1 for v in conc_cov.values() if v == "VERIFIED")
+                sub_metrics.append(f"**Concept Coverage:** {found_conc}/{len(conc_cov)}")
+            if depth_val is not None:
+                sub_metrics.append(f"**Research Depth:** {depth_val}%")
+            if cov_val is not None:
+                sub_metrics.append(f"**Evidence Coverage:** {cov_val}% (of candidate assertions)")
+            if sub_metrics:
+                st.caption(" · ".join(sub_metrics))
 
             # Warning / Failure notice if applicable
             if investigation.failure_reason:
@@ -932,14 +835,14 @@ with tab_research:
             # Network warning notices if any scholarly API encountered delays
             retrieval_errs = investigation.debug.get("retrieval_errors") if investigation.debug else []
             if retrieval_errs:
-                st.info(f"ℹ️ **Scholarly API Note:** {'; '.join(retrieval_errs)}")
+                st.info(f"**Scholarly API Note:** {'; '.join(retrieval_errs)}")
 
             # ── Detailed Result Tabs ──────────────────────────────────────────
             res_tab_report, res_tab_audit, res_tab_papers, res_tab_diag = st.tabs([
-                "📄 Synthesized Report",
-                "🛡️ Citation & Claim Audit",
-                "📚 Ingested Papers & Passages",
-                "⏱️ Pipeline Diagnostics",
+                "Synthesized Report",
+                "Citation & Claim Audit",
+                "Ingested Papers & Passages",
+                "Pipeline Diagnostics",
             ])
 
             # Tab 1: Synthesized Report
@@ -947,16 +850,30 @@ with tab_research:
                 if investigation.report:
                     rep = investigation.report
 
-                    # Download Action Bar (Top)
-                    pdf_report = build_pdf_report(investigation)
-                    md_report = build_markdown_report(investigation)
-                    html_report = build_html_report(investigation)
-                    json_investigation = json.dumps(investigation.model_dump(), indent=2)
+                    # Download Action Bar (Top) with caching per job id and updatedAt
+                    export_cache_key = f"export_{investigation.id}_{investigation.updatedAt or ''}"
+                    if export_cache_key in st.session_state:
+                        cached_exp = st.session_state[export_cache_key]
+                        pdf_report = cached_exp["pdf"]
+                        md_report = cached_exp["md"]
+                        html_report = cached_exp["html"]
+                        json_investigation = cached_exp["json"]
+                    else:
+                        pdf_report = build_pdf_report(investigation)
+                        md_report = build_markdown_report(investigation)
+                        html_report = build_html_report(investigation)
+                        json_investigation = json.dumps(investigation.model_dump(), indent=2)
+                        st.session_state[export_cache_key] = {
+                            "pdf": pdf_report,
+                            "md": md_report,
+                            "html": html_report,
+                            "json": json_investigation,
+                        }
 
                     top_d1, top_d2, top_d3, top_d4 = st.columns(4)
                     with top_d1:
                         st.download_button(
-                            label="📕 Download PDF (.pdf)",
+                            label="Download PDF (.pdf)",
                             data=pdf_report,
                             file_name=f"research_report_{investigation.id}.pdf",
                             mime="application/pdf",
@@ -965,7 +882,7 @@ with tab_research:
                         )
                     with top_d2:
                         st.download_button(
-                            label="📥 Markdown (.md)",
+                            label="Download Markdown (.md)",
                             data=md_report,
                             file_name=f"research_report_{investigation.id}.md",
                             mime="text/markdown",
@@ -974,7 +891,7 @@ with tab_research:
                         )
                     with top_d3:
                         st.download_button(
-                            label="📄 Printable HTML (.html)",
+                            label="Download HTML (.html)",
                             data=html_report,
                             file_name=f"research_report_{investigation.id}.html",
                             mime="text/html",
@@ -983,7 +900,7 @@ with tab_research:
                         )
                     with top_d4:
                         st.download_button(
-                            label="📊 Raw Data (.json)",
+                            label="Download JSON (.json)",
                             data=json_investigation,
                             file_name=f"investigation_{investigation.id}.json",
                             mime="application/json",
@@ -1003,11 +920,10 @@ with tab_research:
                         table_data = []
                         for row in rep.comparisonTable:
                             table_data.append({
-                                "Model / Approach": row.model,
-                                "Dataset / Benchmark": row.dataset,
-                                "Performance": row.f1Score if row.f1Score != "Not extracted" else row.mapScore,
-                                "Venue / Year": f"{row.venue or ''} {row.year or ''}".strip(),
-                                "Citations": row.citationCount or "",
+                                "Paper / Model": row.title or row.model,
+                                "Year": row.year or "Not extracted",
+                                "Venue": row.venue or "Not extracted",
+                                "Citations": row.citationCount or "—",
                             })
                         st.dataframe(table_data, use_container_width=True)
 
@@ -1015,7 +931,7 @@ with tab_research:
                     if rep.findings:
                         st.subheader("Detailed Findings")
                         for sec in rep.findings:
-                            with st.expander(f"📌 {sec.sectionTitle}", expanded=True):
+                            with st.expander(sec.sectionTitle, expanded=True):
                                 for p_idx, para in enumerate(sec.paragraphs):
                                     st.markdown(para.text)
                                     if para.citations:
@@ -1051,11 +967,11 @@ with tab_research:
 
                     # Downloads
                     st.divider()
-                    st.subheader("📥 Export & Download Report")
+                    st.subheader("Export & Download Report")
                     down_col1, down_col2, down_col3, down_col4 = st.columns(4)
                     with down_col1:
                         st.download_button(
-                            label="📕 Download PDF (.pdf)",
+                            label="Download PDF (.pdf)",
                             data=pdf_report,
                             file_name=f"research_report_{investigation.id}.pdf",
                             mime="application/pdf",
@@ -1064,7 +980,7 @@ with tab_research:
                         )
                     with down_col2:
                         st.download_button(
-                            label="📥 Markdown (.md)",
+                            label="Download Markdown (.md)",
                             data=md_report,
                             file_name=f"research_report_{investigation.id}.md",
                             mime="text/markdown",
@@ -1073,7 +989,7 @@ with tab_research:
                         )
                     with down_col3:
                         st.download_button(
-                            label="📄 Printable HTML (.html)",
+                            label="Download HTML (.html)",
                             data=html_report,
                             file_name=f"research_report_{investigation.id}.html",
                             mime="text/html",
@@ -1082,7 +998,7 @@ with tab_research:
                         )
                     with down_col4:
                         st.download_button(
-                            label="📊 Raw Data (.json)",
+                            label="Download JSON (.json)",
                             data=json_investigation,
                             file_name=f"investigation_{investigation.id}.json",
                             mime="application/json",
@@ -1164,6 +1080,27 @@ with tab_research:
             # Tab 4: Diagnostics
             with res_tab_diag:
                 st.subheader("Pipeline Stage Diagnostics & Execution Trace")
+
+                if investigation.debug:
+                    dbg = investigation.debug
+                    st.markdown("**Retrieval & Evidence Funnel:**")
+                    f_col1, f_col2, f_col3, f_col4, f_col5, f_col6, f_col7 = st.columns(7)
+                    with f_col1:
+                        st.metric("1. Discovered", dbg.get("papers_discovered", "-"))
+                    with f_col2:
+                        st.metric("2. Unique", dbg.get("unique_papers", "-"))
+                    with f_col3:
+                        st.metric("3. Relevant", dbg.get("relevant_papers", "-"))
+                    with f_col4:
+                        st.metric("4. Full-Text", dbg.get("full_text_papers", "-"))
+                    with f_col5:
+                        st.metric("5. Passages", investigation.passagesTotal or dbg.get("passages_total", "-"))
+                    with f_col6:
+                        st.metric("6. Ev-Bearing", dbg.get("evidence_bearing_papers", "-"))
+                    with f_col7:
+                        st.metric("7. Verified", dbg.get("verified_claims", "-"))
+                    st.divider()
+
                 if investigation.stage_stats:
                     stat_rows = []
                     for st_item in investigation.stage_stats:
@@ -1184,7 +1121,7 @@ with tab_research:
 
 # ── 9. Investigation History Tab ──────────────────────────────────────────────
 with tab_history:
-    st.header("📜 Investigation History")
+    st.header("Investigation History")
     st.caption("Review previous research investigations stored in the local SQLite database.")
 
     db_h = SessionLocal()
@@ -1218,12 +1155,12 @@ with tab_history:
 
             col_load, col_del = st.columns([2, 1])
             with col_load:
-                if st.button("📂 Load Selected Investigation", type="primary", use_container_width=True):
+                if st.button("Load Selected Investigation", type="primary", use_container_width=True):
                     st.session_state["current_job_id"] = selected_job_to_load
                     st.rerun()
 
             with col_del:
-                if st.button("🗑️ Delete Selected Job", use_container_width=True):
+                if st.button("Delete Selected Job", use_container_width=True):
                     job_to_del = db_h.query(ResearchJob).filter(ResearchJob.id == selected_job_to_load).first()
                     if job_to_del:
                         db_h.delete(job_to_del)

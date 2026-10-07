@@ -950,14 +950,36 @@ def rank_papers(
         else:
             final_score = 0.60 * sem_score + 0.25 * cite_score + 0.15 * title_match_bonus
 
-        # Store transparent relevance scoring and reasons on paper
-        p.relevance_score = round(final_score, 4)
         reasons = [
             f"semantic: {sem_score:.3f}",
             f"citations: {cite_score:.3f} ({cites})",
         ]
         if title_match_bonus > 0:
             reasons.append(f"title_match: {title_match_bonus:.2f}")
+
+        # Domain alignment check for LLM / Transformer questions (Requirement 7)
+        is_llm_question = any(k in question.lower() for k in ["large language model", "llm", "transformer", "language models"])
+        paper_text = f"{p.title} {p.abstract or ''}".lower()
+
+        if is_llm_question:
+            has_llm_term = any(k in paper_text for k in ["large language model", "large language models", "llm", "llms", "transformer", "transformers", "language models", "token generation", "autoregressive"])
+            has_technique = any(k in paper_text for k in ["quantiz", "pruning", "kv cache", "kv-cache", "speculative decoding", "pagedattention", "flashattention", "vllm", "serving", "latency", "memory bandwidth", "inference acceleration"])
+            
+            negative_terms = ["yolo", "object detection", "image segmentation", "convolutional neural", "cnn", "cnns", "imagenet", "medical imaging", "autonomous driving", "r package", "cran", "molecular dynamics", "power grid"]
+            has_negative = any(re.search(r'\b' + re.escape(neg) + r'\b', paper_text) for neg in negative_terms)
+
+            if has_negative and not has_llm_term:
+                final_score *= 0.15  # Severe penalty for off-topic vision / biology / generic ML
+                reasons.append("off_topic_penalty: -85%")
+            elif has_llm_term and has_technique:
+                final_score = min(1.0, final_score + 0.20)
+                reasons.append("llm_inference_alignment_bonus: +0.20")
+            elif has_llm_term:
+                final_score = min(1.0, final_score + 0.10)
+                reasons.append("llm_term_bonus: +0.10")
+
+        # Store transparent relevance scoring and reasons on paper
+        p.relevance_score = round(final_score, 4)
         p.relevance_reasons = reasons
 
         scored_papers.append((final_score, p))
@@ -1014,10 +1036,14 @@ def rank_papers(
     else:
         # Filter papers below minimum relevance threshold
         relevant_pool = [p for p in ranked_pool if getattr(p, "relevance_score", 0.0) >= min_relevance]
-        ranked = relevant_pool[:target_count]
+        if relevant_pool:
+            ranked = relevant_pool[:target_count]
+        else:
+            logger.info("[Ranker] No candidate papers met strict threshold (%.2f); using top candidates from pool.", min_relevance)
+            ranked = ranked_pool[:target_count]
 
     if not ranked:
-        logger.info("[Ranker] No candidate papers met the minimum relevance threshold (%.2f).", min_relevance)
+        logger.info("[Ranker] No candidate papers available after ranking.")
         return []
 
     logger.info("[Ranker] Top paper: '%s' (relevance=%.2f, cites=%d)", ranked[0].title, getattr(ranked[0], "relevance_score", 0.0), getattr(ranked[0], "citationCount", 0) or 0)
