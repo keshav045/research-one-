@@ -236,3 +236,24 @@ async def test_search_manager_respects_disabled_sources():
     papers, stats = await mgr.search_all_sources("transformer attention")
     assert len(papers) == 0
     assert stats["source_counts"] == {}
+
+
+def test_filter_and_extract_sentences_safe_counts():
+    from backend.services.evidence import _filter_and_extract_sentences
+
+    text = (
+        "Short. "  # under 8 words & < 30 chars
+        "Figure 1: This is a caption for the model architecture diagram. "  # caption
+        "The rest of this paper is organized as follows in section 2. "  # procedural fluff
+        "This is an informative technical sentence describing empirical transformer accuracy across benchmarks."
+    )
+
+    # Test 1: counts=None should not throw AttributeError or KeyError
+    sents_none = _filter_and_extract_sentences(text, counts=None)
+    assert len(sents_none) >= 1
+
+    # Test 2: counts={} should safely populate missing keys without KeyError
+    counts_empty = {}
+    sents_empty = _filter_and_extract_sentences(text, counts=counts_empty)
+    assert len(sents_empty) >= 1
+    assert "fragments_under_8_words" in counts_empty or "length_out_of_bounds" in counts_empty

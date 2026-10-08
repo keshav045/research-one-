@@ -117,7 +117,7 @@ def check_verbatim_source_match(claim_text: str, passage_text: str) -> bool:
     return norm_claim in norm_passage
 
 
-def _filter_and_extract_sentences(text: str, counts: Dict[str, int]) -> list[str]:
+def _filter_and_extract_sentences(text: str, counts: Optional[Dict[str, int]] = None) -> list[str]:
     """Split passage text into sentences, apply evidence filters, strip artifacts, and track removal counts."""
     cleaned = re.sub(r"\s+", " ", clean_hyphenated_breaks(text).strip())
     raw_sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", cleaned)
@@ -134,32 +134,38 @@ def _filter_and_extract_sentences(text: str, counts: Dict[str, int]) -> list[str
         # Check fragment under 8 words
         words = s_clean.split()
         if len(words) < 8:
-            counts["fragments_under_8_words"] += 1
+            if counts is not None:
+                counts["fragments_under_8_words"] = counts.get("fragments_under_8_words", 0) + 1
             continue
 
         # Check length
         if len(s_clean) < 30 or len(s_clean) > 350:
-            counts["length_out_of_bounds"] += 1
+            if counts is not None:
+                counts["length_out_of_bounds"] = counts.get("length_out_of_bounds", 0) + 1
             continue
 
         # Check captions
         if _CAPTION_REGEX.search(s_clean):
-            counts["captions"] += 1
+            if counts is not None:
+                counts["captions"] = counts.get("captions", 0) + 1
             continue
 
         # Check author notes / affiliations
         if _AUTHOR_NOTE_REGEX.search(s_clean):
-            counts["author_notes"] += 1
+            if counts is not None:
+                counts["author_notes"] = counts.get("author_notes", 0) + 1
             continue
 
         # Check references / bibliography
         if _REFERENCE_REGEX.search(s_clean):
-            counts["references"] += 1
+            if counts is not None:
+                counts["references"] = counts.get("references", 0) + 1
             continue
 
         # Check procedural / meta-text fluff (Section 2 related work, etc.)
         if _META_PROCEDURAL_REGEX.search(s_clean):
-            counts["procedural_fluff"] = counts.get("procedural_fluff", 0) + 1
+            if counts is not None:
+                counts["procedural_fluff"] = counts.get("procedural_fluff", 0) + 1
             continue
 
         sentences.append(s_clean)
@@ -203,6 +209,7 @@ def extract_and_verify_evidence(
             "references": 0,
             "fragments_under_8_words": 0,
             "length_out_of_bounds": 0,
+            "procedural_fluff": 0,
         }
 
     # Map paper_id to Paper object
@@ -225,6 +232,7 @@ def extract_and_verify_evidence(
         "references": 0,
         "fragments_under_8_words": 0,
         "length_out_of_bounds": 0,
+        "procedural_fluff": 0,
     }
 
     # 1. Retrieve top 5 passages per sub-question and extract candidate assertions
@@ -321,7 +329,7 @@ def extract_and_verify_evidence(
                             for tp_rec, tp_sc in target_passages:
                                 tp_text = clean_hyphenated_breaks(tp_rec.passage.text)
                                 if check_verbatim_source_match(sent, tp_text) or any(
-                                    check_verbatim_source_match(s, tp_text) for s in _filter_and_extract_sentences(tp_text, {})
+                                    check_verbatim_source_match(s, tp_text) for s in _filter_and_extract_sentences(tp_text)
                                 ):
                                     verified_target_match = (tp_rec, tp_text, tp_sc)
                                     break
