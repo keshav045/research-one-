@@ -16,14 +16,11 @@ Every stage records StageStat(name, started_at, duration_ms, in_count, out_count
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import math
 import time
-import uuid
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, Any
 
 from sqlalchemy.orm import Session
 
@@ -32,7 +29,6 @@ from ..models.database import ResearchJob, PaperRecord
 from ..models.schemas import (
     Citation,
     CitationStatus,
-    Claim,
     EntailmentVerdict,
     IntegrityMetrics,
     Paper,
@@ -42,7 +38,6 @@ from ..models.schemas import (
     ResearchReport,
     ResearchSource,
     StageStat,
-    StepStatus,
 )
 from .paper_retrieval import (
     retrieve_papers,

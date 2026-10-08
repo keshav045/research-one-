@@ -280,6 +280,18 @@ def collapse_repeated_citations(text: str) -> str:
     return text
 
 
+def strip_internal_pdf_citations(text: str) -> str:
+    """
+    Strips raw inline citation brackets from source PDFs (e.g. '[64]', '[1, 2]', '[12-14]')
+    so that only ResearchLens's own canonical bibliography markers '[1..N]' are used.
+    """
+    if not text:
+        return ""
+    cleaned = re.sub(r"\[\d+(?:[\s,\-–\u2013\u2014]+\d+)*\]", "", text)
+    cleaned = re.sub(r"\s+([.,;:!?])", r"\1", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _format_first_sentence(
     question: str,
     anchor_paper: Optional[Paper],
@@ -326,7 +338,7 @@ async def generate_plain_answer(
     if q_type != "factual_lookup" and n_papers <= 1:
         first_c = verified_citations[0]
         ref_num = ref_index.get(first_c.paperId, 1) if ref_index else 1
-        claim_text = first_c.claim.strip().rstrip(".")
+        claim_text = strip_internal_pdf_citations(first_c.claim).rstrip(".")
         honest_answer = (
             f"Research coverage is insufficient to answer this question in general. "
             f"Only {n_papers} relevant paper(s) with usable evidence were retrieved. "
@@ -339,8 +351,9 @@ async def generate_plain_answer(
     claims_context = []
     for c in verified_citations[:8]:
         r_num = ref_index.get(c.paperId, c.badgeNumber) if ref_index else c.badgeNumber
+        c_claim = strip_internal_pdf_citations(c.claim)
         claims_context.append(
-            f"[{r_num}] {c.claim} (Paper: '{c.paperTitle}', Authors: {c.authors}, Year: {c.year}, Page: {c.page})"
+            f"[{r_num}] {c_claim} (Paper: '{c.paperTitle}', Authors: {c.authors}, Year: {c.year}, Page: {c.page})"
         )
     claims_block = "\n".join(claims_context)
 
@@ -373,7 +386,7 @@ async def generate_plain_answer(
     body_sentences = []
     seen_fallback_claims = set()
     for c in verified_citations[:6]:
-        text = c.claim.strip().rstrip(".")
+        text = strip_internal_pdf_citations(c.claim).rstrip(".")
         norm = text.lower()
         if norm in seen_fallback_claims:
             continue
@@ -599,7 +612,15 @@ async def synthesize_report(
         )
         return ""
 
-    verified_answer = re.sub(r"\[(\d+)\]", _validate_ref, verified_answer)
+    def _clean_section_citations(text: str) -> str:
+        if not text:
+            return ""
+        t = re.sub(r"\[(\d+)\]", _validate_ref, text)
+        t = collapse_repeated_citations(t)
+        t = re.sub(r"\s+([.,;:!?])", r"\1", t)
+        return re.sub(r"\s+", " ", t).strip()
+
+    verified_answer = _clean_section_citations(verified_answer)
 
     # Author-reference alignment: ensure named authors in prose match the cited reference paper
     def _align_author_citations(sentence: str) -> str:
@@ -622,9 +643,7 @@ async def synthesize_report(
 
     sents_aligned = [_align_author_citations(s) for s in split_into_sentences(verified_answer)]
     verified_answer = " ".join(sents_aligned)
-    verified_answer = collapse_repeated_citations(verified_answer)
-    verified_answer = re.sub(r"\s+([.,;:!?])", r"\1", verified_answer)
-    verified_answer = re.sub(r"\s+", " ", verified_answer).strip()
+    verified_answer = _clean_section_citations(verified_answer)
 
     # 3. Build structured sections from metadata
     methodology = build_methodology_from_stats(
@@ -689,8 +708,13 @@ async def synthesize_report(
                     seen_claims.add(c.claim)
                     unique_f_cites.append(c)
 
-            p_text = " ".join(f"{c.claim.strip().rstrip('.')} [{ref_index.get(c.paperId, 1)}]." for c in unique_f_cites[:4])
-            p_text = collapse_repeated_citations(p_text)
+            clean_claims = []
+            for c in unique_f_cites[:4]:
+                c_claim = strip_internal_pdf_citations(c.claim).rstrip(".")
+                r_num = ref_index.get(c.paperId, 1)
+                clean_claims.append(f"{c_claim} [{r_num}].")
+            p_text = " ".join(clean_claims)
+            p_text = _clean_section_citations(p_text)
             findings.append(ReportSection(
                 sectionTitle=f,
                 paragraphs=[ReportParagraph(
@@ -700,7 +724,7 @@ async def synthesize_report(
             ))
             # B5: Build technique comparison rows ONLY for concepts with verified evidence
             top_claim = unique_f_cites[0]
-            impact_text = top_claim.claim.strip().rstrip(".")
+            impact_text = strip_internal_pdf_citations(top_claim.claim).rstrip(".")
             tech_comparison.append({
                 "technique": f,
                 "category": "Empirical Finding",
@@ -721,8 +745,13 @@ async def synthesize_report(
             if c.claim not in seen_claims:
                 seen_claims.add(c.claim)
                 unique_unmatched.append(c)
-        p_text = " ".join(f"{c.claim.strip().rstrip('.')} [{ref_index.get(c.paperId, 1)}]." for c in unique_unmatched[:4])
-        p_text = collapse_repeated_citations(p_text)
+        clean_claims = []
+        for c in unique_unmatched[:4]:
+            c_claim = strip_internal_pdf_citations(c.claim).rstrip(".")
+            r_num = ref_index.get(c.paperId, 1)
+            clean_claims.append(f"{c_claim} [{r_num}].")
+        p_text = " ".join(clean_claims)
+        p_text = _clean_section_citations(p_text)
         findings.append(ReportSection(
             sectionTitle="Additional Empirical Findings",
             paragraphs=[ReportParagraph(
@@ -741,11 +770,17 @@ async def synthesize_report(
 
     # If findings was empty, populate with citations
     if not findings and citations:
-        p_text = " ".join(f"{c.claim.strip().rstrip('.')} [{ref_index.get(c.paperId, 1)}]." for c in citations[:4])
+        clean_claims = []
+        for c in citations[:4]:
+            c_claim = strip_internal_pdf_citations(c.claim).rstrip(".")
+            r_num = ref_index.get(c.paperId, 1)
+            clean_claims.append(f"{c_claim} [{r_num}].")
+        p_text = " ".join(clean_claims)
+        p_text = _clean_section_citations(p_text)
         findings.append(ReportSection(
             sectionTitle="Empirical Findings",
             paragraphs=[ReportParagraph(
-                text=collapse_repeated_citations(p_text),
+                text=p_text,
                 citations=citations[:4],
             )]
         ))
@@ -767,6 +802,7 @@ async def synthesize_report(
         exec_sents_clean.append(s)
     if exec_sents_clean:
         exec_summary = " ".join(exec_sents_clean)
+    exec_summary = _clean_section_citations(exec_summary)
 
     if debug_info is not None:
         debug_info["concept_coverage"] = concept_coverage_map
@@ -825,6 +861,8 @@ async def synthesize_report(
         conclusion_parts.append(f"Warnings: {'; '.join(warning_notes)}.")
 
     conclusion = " ".join(conclusion_parts)
+    conclusion = _clean_section_citations(conclusion)
+    limitations = [_clean_section_citations(l) for l in limitations]
 
     report = ResearchReport(
         executiveSummary=exec_summary,

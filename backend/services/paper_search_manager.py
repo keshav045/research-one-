@@ -17,12 +17,11 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import settings
-from ..models.schemas import Paper, ResearchDepth, ResearchSource
+from ..models.schemas import Paper
 from .paper_retrieval import (
     _fetch_arxiv_query,
     _fetch_semantic_scholar_query,
     _fetch_openalex_query,
-    retrieve_candidate_papers,
 )
 
 logger = logging.getLogger(__name__)

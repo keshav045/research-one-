@@ -13,12 +13,10 @@ from __future__ import annotations
 
 import logging
 import re
-import uuid
 from typing import List, Tuple, Optional, Dict
 
 from ..models.schemas import (
     Paper,
-    PaperPassage,
     Citation,
     CitationStatus,
     Claim,
@@ -28,7 +26,6 @@ from ..models.schemas import (
 )
 from ..config import settings
 from .vector_store import VectorStore, PassageRecord
-from .nli_verifier import verify_claims_batch, EntailmentVerdict
 from .ranker import get_reranker
 import math
 
