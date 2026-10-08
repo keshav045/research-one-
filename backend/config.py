@@ -39,13 +39,13 @@ class Settings(BaseSettings):
     # Semantic Scholar
     SEMANTIC_SCHOLAR_API_KEY: str = ""
 
-    # OpenAlex Polite Pool & API Key
-    OPENALEX_EMAIL: str = "rohitkumar700as@gmail.com"
+    # OpenAlex Polite Pool & API Key (Configured via environment)
+    OPENALEX_EMAIL: str = ""
     OPENALEX_API_KEY: str = ""
-    OPENALEX_FIELD_FILTER: str = "topics.field.id:17"
+    OPENALEX_FIELD_FILTER: str = ""
 
-    # Domain / Field of Study Filters
-    DEFAULT_FIELDS_OF_STUDY: str = "Computer Science"
+    # Domain / Field of Study Filters (Optional dynamic filter)
+    DEFAULT_FIELDS_OF_STUDY: str = ""
 
     # Source Configuration
     ARXIV_ENABLED: bool = True
@@ -85,7 +85,8 @@ class Settings(BaseSettings):
     TORCH_NUM_THREADS: int = 4
     EMBED_MAX_LENGTH: int = 128
     SKIP_NONBODY_SECTIONS: bool = True
-    MAX_PASSAGES_PER_PAPER: int = 20
+    MAX_PDF_PAGES: int = 100
+    MAX_PASSAGES_PER_PAPER: int = 25
     EMBED_CACHE_ENABLED: bool = True
     EMBED_QUANTIZE: bool = False
     EMBEDDING_BACKEND: str = "auto"  # "auto" | "openai" | "local"

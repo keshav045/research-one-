@@ -1,12 +1,12 @@
 """
-Evidence Extraction & NLI Verification Engine
-=============================================
+Evidence Extraction & Provenance Grounding Engine
+=================================================
 Implements Phase 5 of the architecture blueprint:
-1. For each sub-question, queries the FAISS vector store.
-2. Selects top passages with semantic reranking.
-3. Extracts candidate assertions from source passages.
-4. Verifies candidate claims against the exact passage window using DeBERTa NLI.
-5. Returns verified claims and fully attributed citations with exact page numbers.
+Two-Tier Verification Architecture:
+- Tier 1 (Evidence Stage): CrossEncoder semantic relevance gating + verbatim source-passage
+  provenance verification with exact page number tracking.
+- Tier 2 (Synthesis Stage): Answer-level Natural Language Inference (NLI) sentence audit
+  using DeBERTa-v3 cross-encoder (see `backend/services/nli_verifier.py`).
 """
 
 from __future__ import annotations
@@ -188,14 +188,11 @@ def extract_and_verify_evidence(
        - If anchor exists, searches anchor passages first with CrossEncoder reranking.
          Adds other papers' passages only if anchor yields fewer than 3 relevant ones.
        - Extracts candidate assertions per sub-question.
-    2. Relevance Gate & NLI Verification:
-       - Reranker evaluates (sub_question, claim) relevance.
-       - DeBERTa evaluates NLI entailment against evidence passage.
-       - A claim is 'verified' only if:
-           NLI entailment >= NLI_ENTAIL_THRESHOLD (0.80)
-           AND
-           reranker relevance >= RELEVANCE_THRESHOLD (0.30).
-       - Rejected claims are preserved with exact rejection reasons ('not relevant', 'not entailed').
+    2. Tier 1 Dual Gate (Relevance & Provenance Match):
+       - CrossEncoder evaluates (sub_question, claim) relevance (>= RELEVANCE_THRESHOLD).
+       - Verbatim source match guarantees exact provenance against source publication passage.
+       - Tier 2 answer-level NLI entailment audit is executed later during report synthesis.
+       - Rejected claims are preserved with exact rejection reasons ('not relevant', 'claim not found verbatim').
     3. Deduplicates identical claims before ranking and returns verified claims, citations, and rejected claims.
     """
     if not papers:
@@ -302,24 +299,41 @@ def extract_and_verify_evidence(
                 # Detect if the sentence explicitly attributes work to an external author (e.g. "Lewis et al.", "Gao et al.")
                 ext_author_matches = re.findall(r"\b([A-Z][a-zA-Z\-]+)\s+(?:et\s+al\.?|\(\d{4}\))", sent)
                 target_rec = rec
+                target_passage_text = passage_text
+                target_score = sc
+
                 if ext_author_matches and rec_paper:
                     # Check if the named author is an author of THIS paper
                     if not any(a.lower() in rec_authors_lower for a in ext_author_matches):
-                        # Sentence is citing an external author! Check if that external author has a paper in our candidate papers
-                        matched_other_rec = None
-                        for other_rec, _ in sub_passages:
-                            other_p = paper_map.get(other_rec.paper_id)
-                            if other_p and other_p.id != rec_paper.id and other_p.authors:
-                                other_auth_str = " ".join(other_p.authors).lower()
-                                if any(a.lower() in other_auth_str for a in ext_author_matches):
-                                    matched_other_rec = other_rec
+                        # Sentence is citing an external author! Check if that external author has a paper in our corpus
+                        matched_other_paper = None
+                        for p in papers:
+                            if p.id != rec_paper.id and p.authors:
+                                p_auths = " ".join(p.authors).lower()
+                                if any(a.lower() in p_auths for a in ext_author_matches):
+                                    matched_other_paper = p
                                     break
-                        if matched_other_rec is not None:
-                            # Re-attribute claim to the actual author's paper
-                            target_rec = matched_other_rec
+
+                        if matched_other_paper is not None:
+                            # Re-retrieve from the actual author's paper to verify true provenance
+                            target_passages = vector_store.search_paper(paper_id=matched_other_paper.id, query=sent, top_k=3)
+                            verified_target_match = None
+                            for tp_rec, tp_sc in target_passages:
+                                tp_text = clean_hyphenated_breaks(tp_rec.passage.text)
+                                if check_verbatim_source_match(sent, tp_text) or any(
+                                    check_verbatim_source_match(s, tp_text) for s in _filter_and_extract_sentences(tp_text, {})
+                                ):
+                                    verified_target_match = (tp_rec, tp_text, tp_sc)
+                                    break
+
+                            if verified_target_match is not None:
+                                target_rec, target_passage_text, target_score = verified_target_match
+                            else:
+                                # Target paper does not contain a verified supporting passage for this claim;
+                                # reject candidate to prevent false cross-paper re-attribution.
+                                continue
                         else:
                             # Do not falsely attribute an external author's finding to this paper
-                            # (prevents e.g. "Lewis et al. [1]" pointing to Gao's survey)
                             continue
 
                 claim_norm = re.sub(r"[^a-z0-9]", "", sent.lower())
@@ -331,8 +345,8 @@ def extract_and_verify_evidence(
                     "sub_q": sub_q,
                     "sentence": sent,
                     "record": target_rec,
-                    "passage_text": passage_text,
-                    "passage_score": sc,
+                    "passage_text": target_passage_text,
+                    "passage_score": target_score,
                 })
 
     _last_removal_counts = dict(removal_counts)

@@ -22,6 +22,7 @@ from .paper_retrieval import (
     _fetch_arxiv_query,
     _fetch_semantic_scholar_query,
     _fetch_openalex_query,
+    _format_arxiv_query_expr,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,8 @@ class PaperSearchManager:
             logger.info("[SearchManager] arXiv is disabled via configuration.")
             return []
         try:
-            return await _fetch_arxiv_query(f'all:"{query}"', limit)
+            expr = _format_arxiv_query_expr(query) if not (query.startswith("all:") or query.startswith("ti:")) else query
+            return await _fetch_arxiv_query(expr or query, limit)
         except Exception as exc:
             logger.warning("[SearchManager] arXiv search failed for '%s': %s", query, exc)
             return []

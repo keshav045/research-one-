@@ -1,6 +1,8 @@
-"""Regression tests for the PDF exporter (overprint, table columns, glyphs, citations)."""
+from __future__ import annotations
+
 import collections
 import re
+from typing import Optional
 
 import pytest
 
@@ -16,7 +18,7 @@ from backend.services.pdf_report import build_pdf_report  # noqa: E402
 TEXT_OP = re.compile(r"1 0 0 1 ([\d.\-]+) ([\d.\-]+) Tm\s*/\w+ [\d.]+ Tf[^\[]*\[<([0-9a-f]+)>\]TJ")
 
 
-def _investigation(summary: str, n_cites: int = 2) -> ResearchInvestigation:
+def _investigation(summary: str, n_cites: int = 2, findings_text: Optional[str] = None) -> ResearchInvestigation:
     paper = Paper(
         id="p1", title="Efficient Memory Management for Large Language Model Serving with PagedAttention",
         authors=["Woosuk Kwon", "Z. Li", "Siyuan Zhuang", "Y. Sheng"], publicationYear=2023,
@@ -28,9 +30,10 @@ def _investigation(summary: str, n_cites: int = 2) -> ResearchInvestigation:
                  paperTitle=paper.title, authors="Kwon et al.", year=2023, page=1, passage="p", highlightSentence="h")
         for i in range(1, n_cites + 1)
     ]
+    f_text = findings_text or "PagedAttention segments the KV cache into virtual memory blocks, eliminating fragmentation [1]."
     report = ResearchReport(
         executiveSummary=summary, methodology="m",
-        findings=[ReportSection(sectionTitle="Verified Findings", paragraphs=[ReportParagraph(text=summary, citations=cites)])],
+        findings=[ReportSection(sectionTitle="Verified Findings", paragraphs=[ReportParagraph(text=f_text, citations=cites)])],
         comparisonTable=[ComparisonRow(
             model=paper.title, dataset="2023", f1Score=paper.journalConference, mapScore="8,884",
             title=paper.title, authors="Kwon", year="2023", venue=paper.journalConference, citationCount="8,884")],
@@ -68,7 +71,8 @@ def test_every_line_is_drawn_once():
 
 def test_extracted_text_has_no_repeats():
     text, _ = _pdf_text_and_draws(build_pdf_report(_investigation(SUMMARY), validate=False))
-    assert text.count("Research coverage is currently limited") == 2  # summary + findings, not hundreds
+    assert text.count("Research coverage is currently limited") == 1  # summary only, no duplicate in findings
+    assert "PagedAttention segments the KV cache" in text
     assert len(text) < 4000
 
 

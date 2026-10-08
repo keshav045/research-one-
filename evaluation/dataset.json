@@ -1,0 +1,92 @@
+[
+  {
+    "id": "bench-01-transformer",
+    "question": "Which paper introduced the Transformer architecture, and what was its key idea?",
+    "domain": "Machine Learning / NLP",
+    "expected_arxiv": ["1706.03762"],
+    "expected_dois": ["10.48550/arxiv.1706.03762"],
+    "expected_titles": ["Attention Is All You Need"],
+    "expected_facets": ["Self-Attention", "Transduction", "Recurrence", "Multi-Head Attention"]
+  },
+  {
+    "id": "bench-02-rag",
+    "question": "What is retrieval-augmented generation and who proposed it?",
+    "domain": "Information Retrieval / NLP",
+    "expected_arxiv": ["2005.11401"],
+    "expected_dois": ["10.48550/arxiv.2005.11401"],
+    "expected_titles": ["Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks"],
+    "expected_facets": ["Retrieval Augmented Generation", "Parametric Memory", "Dense Passage Retrieval"]
+  },
+  {
+    "id": "bench-03-bert",
+    "question": "Which paper introduced BERT for language representation?",
+    "domain": "Machine Learning / NLP",
+    "expected_arxiv": ["1810.04805"],
+    "expected_dois": ["10.48550/arxiv.1810.04805"],
+    "expected_titles": ["BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding"],
+    "expected_facets": ["Bidirectional Transformers", "Masked Language Model", "Next Sentence Prediction"]
+  },
+  {
+    "id": "bench-04-resnet",
+    "question": "Which paper introduced deep residual learning and skip connections in CNNs?",
+    "domain": "Computer Vision",
+    "expected_arxiv": ["1512.03385"],
+    "expected_dois": ["10.48550/arxiv.1512.03385"],
+    "expected_titles": ["Deep Residual Learning for Image Recognition"],
+    "expected_facets": ["Residual Learning", "Skip Connections", "Deep Neural Networks"]
+  },
+  {
+    "id": "bench-05-adam",
+    "question": "Which paper proposed the Adam optimizer for stochastic gradient descent?",
+    "domain": "Optimization / Machine Learning",
+    "expected_arxiv": ["1412.6980"],
+    "expected_dois": ["10.48550/arxiv.1412.6980"],
+    "expected_titles": ["Adam: A Method for Stochastic Optimization"],
+    "expected_facets": ["First-Order Gradients", "Adaptive Moment Estimation", "Stochastic Optimization"]
+  },
+  {
+    "id": "bench-06-gan",
+    "question": "Who introduced generative adversarial networks?",
+    "domain": "Generative AI",
+    "expected_arxiv": ["1406.2661"],
+    "expected_dois": ["10.48550/arxiv.1406.2661"],
+    "expected_titles": ["Generative Adversarial Nets"],
+    "expected_facets": ["Minimax Game", "Discriminative Model", "Generative Model"]
+  },
+  {
+    "id": "bench-07-lora",
+    "question": "Which paper introduced LoRA for parameter-efficient fine-tuning of large language models?",
+    "domain": "LLM Efficiency",
+    "expected_arxiv": ["2106.09685"],
+    "expected_dois": ["10.48550/arxiv.2106.09685"],
+    "expected_titles": ["LoRA: Low-Rank Adaptation of Large Language Models"],
+    "expected_facets": ["Low-Rank Adaptation", "Parameter-Efficient", "Weight Matrices"]
+  },
+  {
+    "id": "bench-08-vit",
+    "question": "Which paper introduced Vision Transformers (ViT) applying self-attention directly to image patches?",
+    "domain": "Computer Vision",
+    "expected_arxiv": ["2010.11929"],
+    "expected_dois": ["10.48550/arxiv.2010.11929"],
+    "expected_titles": ["An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale"],
+    "expected_facets": ["Image Patches", "Self-Attention", "Image Recognition"]
+  },
+  {
+    "id": "bench-09-latent-diffusion",
+    "question": "Which paper introduced Latent Diffusion Models for high-resolution image synthesis?",
+    "domain": "Generative AI / Vision",
+    "expected_arxiv": ["2112.10752"],
+    "expected_dois": ["10.48550/arxiv.2112.10752"],
+    "expected_titles": ["High-Resolution Image Synthesis with Latent Diffusion Models"],
+    "expected_facets": ["Latent Diffusion", "Perceptual Compression", "Cross-Attention"]
+  },
+  {
+    "id": "bench-10-crispr",
+    "question": "How does CRISPR-Cas9 genome editing repair double-strand breaks in eukaryotic cells?",
+    "domain": "Molecular Biology",
+    "expected_arxiv": [],
+    "expected_dois": ["10.1126/science.1225829"],
+    "expected_titles": ["A Programmable Dual-RNA-Guided DNA Endonuclease in Adaptive Bacterial Immunity"],
+    "expected_facets": ["Non-Homologous End Joining", "Homology-Directed Repair", "Double-Strand Breaks"]
+  }
+]

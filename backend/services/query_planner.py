@@ -60,139 +60,6 @@ def classify_question_type(question: str) -> str:
     return "literature_review"
 
 
-LLM_INFERENCE_CONCEPTS = [
-    "LLM quantization",
-    "weight-only quantization",
-    "pruning",
-    "KV-cache optimization",
-    "memory management / PagedAttention",
-    "speculative decoding",
-    "inference kernels / kernel optimization",
-    "batching / serving optimization",
-    "latency optimization",
-    "computational efficiency",
-]
-
-LLM_INFERENCE_FOCUSED_QUERIES = [
-    "efficient LLM inference",
-    "large language model quantization inference",
-    "LLM weight-only quantization memory",
-    "LLM KV cache optimization",
-    "PagedAttention LLM memory management vLLM",
-    "speculative decoding inference efficiency",
-    "LLM pruning inference",
-    "LLM serving memory optimization",
-    "LLM inference kernel optimization",
-    "LLM inference latency optimization",
-]
-
-LLM_INFERENCE_TITLES = [
-    "Efficient Memory Management for Large Language Model Serving with PagedAttention",
-    "AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration",
-    "Fast Inference from Transformers via Speculative Decoding",
-    "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness",
-]
-
-LLM_INFERENCE_SUB_QUESTIONS = [
-    "What are the most effective memory management, PagedAttention, and KV-cache optimization techniques for large language model inference?",
-    "How do weight-only quantization and pruning reduce LLM inference memory and computational cost?",
-    "How do speculative decoding, continuous batching, and kernel optimizations reduce LLM inference latency?",
-]
-
-
-def is_llm_inference_optimization_query(question: str) -> bool:
-    """Check if question specifically investigates LLM inference optimization."""
-    q = question.lower()
-    has_llm = any(k in q for k in ["large language model", "llm", "transformer", "language models"])
-    has_opt = any(k in q for k in ["inference", "optimi", "memory", "latency", "computational cost", "serving", "throughput", "kv cache", "quantiz", "pruning"])
-    return has_llm and has_opt
-
-
-class QueryPlan(TypedDict):
-    question_type: str
-    queries: list[str]
-    title_guesses: list[str]
-    sub_questions: list[str]
-    target_concepts: list[str]
-    plan_source: Optional[str]
-    expected_titles: Optional[list[str]]
-    planner_provider: Optional[str]
-    planner_model: Optional[str]
-
-
-def fallback_query_planner(question: str) -> QueryPlan:
-    """
-    Deterministic rule-based query generator when LLM is unavailable or fails.
-    Removes stop words and meta words, extracts named paper/model concepts.
-    """
-    q_type = classify_question_type(question)
-
-    # Check for LLM inference optimization question
-    if is_llm_inference_optimization_query(question):
-        return {
-            "question_type": "literature_review",
-            "queries": list(LLM_INFERENCE_FOCUSED_QUERIES),
-            "title_guesses": list(LLM_INFERENCE_TITLES),
-            "sub_questions": list(LLM_INFERENCE_SUB_QUESTIONS),
-            "target_concepts": list(LLM_INFERENCE_CONCEPTS),
-            "plan_source": "specialized_benchmark_planner",
-            "expected_titles": list(LLM_INFERENCE_TITLES),
-            "planner_provider": "deterministic",
-            "planner_model": "rule_based",
-        }
-
-    # 1. Clean tokens
-    tokens = re.sub(r"[^a-zA-Z0-9\s-]", " ", question.lower()).split()
-    meaningful = [t for t in tokens if len(t) > 2 and t not in STOP_WORDS]
-    keywords = [t for t in meaningful if t not in META_WORDS]
-
-    queries: list[str] = []
-    title_guesses: list[str] = []
-    # Default sub-question fallback: use the original question as the only sub-question
-    sub_questions = [question.strip()]
-
-    # Seed list of well-known papers for deterministic fallback guidance;
-    # not the planner's main logic. Disabled when SEED_PAPERS_ENABLED=False.
-    if getattr(settings, "SEED_PAPERS_ENABLED", True):
-        lower_q = question.lower()
-        if re.search(r"\btransformer\b", lower_q):
-            queries.append("Attention Is All You Need Vaswani")
-            queries.append("transformer self-attention")
-            title_guesses.append("Attention Is All You Need")
-        elif re.search(r"\bbert\b", lower_q):
-            queries.append("BERT Pre-training Deep Bidirectional Devlin")
-            queries.append("masked language model BERT")
-            title_guesses.append("BERT: Pre-training of Deep Bidirectional Transformers")
-        elif re.search(r"\b(resnet|residual)\b", lower_q):
-            queries.append("Deep Residual Learning Image Recognition He")
-            queries.append("residual networks skip connection")
-            title_guesses.append("Deep Residual Learning for Image Recognition")
-        elif re.search(r"\blora\b", lower_q):
-            queries.append("LoRA Low-Rank Adaptation Large Language Models Hu")
-            title_guesses.append("LoRA: Low-Rank Adaptation of Large Language Models")
-
-    # Add generic cleaned keyword query
-    if keywords:
-        clean_kw = " ".join(keywords[:5])
-        if clean_kw not in queries:
-            queries.append(clean_kw)
-
-    # Extract target concepts from keywords
-    target_concepts = [kw.capitalize() for kw in keywords[:6]] if keywords else ["General Topic"]
-
-    return {
-        "question_type": q_type,
-        "queries": queries[:6],
-        "title_guesses": title_guesses[:2],
-        "sub_questions": sub_questions,
-        "target_concepts": target_concepts,
-        "plan_source": "fallback",
-        "expected_titles": title_guesses[:2],
-        "planner_provider": "none",
-        "planner_model": "none",
-    }
-
-
 def extract_question_facets(question: str, sub_questions: Optional[list[str]] = None) -> list[str]:
     """Extract topical facets or sub-aspects dynamically for any research question."""
     # 1. If sub-questions are provided and multiple, synthesize facet titles from them
@@ -223,6 +90,104 @@ def extract_question_facets(question: str, sub_questions: Optional[list[str]] = 
         chunk = meaningful[i:i+2]
         facets.append(" ".join(w.capitalize() for w in chunk))
     return facets or ["Empirical Findings"]
+
+
+class QueryPlan(TypedDict):
+    question_type: str
+    queries: list[str]
+    title_guesses: list[str]
+    sub_questions: list[str]
+    target_concepts: list[str]
+    plan_source: Optional[str]
+    expected_titles: Optional[list[str]]
+    planner_provider: Optional[str]
+    planner_model: Optional[str]
+
+
+def fallback_query_planner(question: str) -> QueryPlan:
+    """
+    Deterministic rule-based query generator when LLM is unavailable or fails.
+    Extracts dynamic facets, concepts, sub-questions, and keyword queries without hardcoded topics.
+    """
+    q_type = classify_question_type(question)
+
+    # 1. Clean tokens
+    tokens = re.sub(r"[^a-zA-Z0-9\s-]", " ", question.lower()).split()
+    meaningful = [t for t in tokens if len(t) > 2 and t not in STOP_WORDS]
+    keywords = [t for t in meaningful if t not in META_WORDS]
+
+    # 2. Dynamic sub-question generation based on question structure
+    sub_questions = []
+    compound_parts = re.split(r"\b(?:and|in terms of|as well as|compared to|versus|vs\.?)\b", question, flags=re.IGNORECASE)
+    if len(compound_parts) > 1:
+        for part in compound_parts[:3]:
+            p_clean = part.strip().rstrip("?").strip()
+            if len(p_clean.split()) >= 3:
+                if not any(p_clean.lower().startswith(w) for w in ["what", "how", "why", "which"]):
+                    sub_questions.append(f"What is the empirical evidence regarding {p_clean}?")
+                else:
+                    sub_questions.append(f"{p_clean}?")
+    if not sub_questions:
+        sub_questions = [question.strip()]
+
+    # 3. Dynamic facet extraction
+    facets = extract_question_facets(question, sub_questions)
+
+    queries: list[str] = []
+    title_guesses: list[str] = []
+
+    # 4. Generate topical keyword queries per facet
+    if keywords:
+        broad_kw = " ".join(keywords[:4])
+        queries.append(broad_kw)
+
+        for f in facets:
+            f_words = [w.lower() for w in re.findall(r"\b\w{3,}\b", f) if w.lower() not in STOP_WORDS]
+            if f_words:
+                f_query = " ".join(f_words + keywords[:2])
+                f_query_dedup = " ".join(dict.fromkeys(f_query.split()))
+                if f_query_dedup not in queries:
+                    queries.append(f_query_dedup)
+
+    # Seed list of well-known papers for deterministic fallback guidance when enabled
+    if getattr(settings, "SEED_PAPERS_ENABLED", True):
+        lower_q = question.lower()
+        if re.search(r"\btransformer\b", lower_q):
+            queries.append("Attention Is All You Need Vaswani")
+            queries.append("transformer self-attention")
+            title_guesses.append("Attention Is All You Need")
+        elif re.search(r"\bbert\b", lower_q):
+            queries.append("BERT Pre-training Deep Bidirectional Devlin")
+            queries.append("masked language model BERT")
+            title_guesses.append("BERT: Pre-training of Deep Bidirectional Transformers")
+        elif re.search(r"\b(resnet|residual)\b", lower_q):
+            queries.append("Deep Residual Learning Image Recognition He")
+            queries.append("residual networks skip connection")
+            title_guesses.append("Deep Residual Learning for Image Recognition")
+        elif re.search(r"\blora\b", lower_q):
+            queries.append("LoRA Low-Rank Adaptation Large Language Models Hu")
+            title_guesses.append("LoRA: Low-Rank Adaptation of Large Language Models")
+
+    # Target concepts derived dynamically from facets and keywords
+    target_concepts = [f.title() for f in facets]
+    for kw in keywords[:4]:
+        kw_cap = kw.capitalize()
+        if kw_cap not in target_concepts:
+            target_concepts.append(kw_cap)
+
+    unique_queries = list(dict.fromkeys(queries))
+
+    return {
+        "question_type": q_type,
+        "queries": unique_queries[:6],
+        "title_guesses": title_guesses[:2],
+        "sub_questions": sub_questions[:3],
+        "target_concepts": target_concepts[:8],
+        "plan_source": "dynamic_fallback_planner",
+        "expected_titles": title_guesses[:2],
+        "planner_provider": "deterministic",
+        "planner_model": "dynamic_facets",
+    }
 
 
 async def plan_research_queries(question: str) -> QueryPlan:

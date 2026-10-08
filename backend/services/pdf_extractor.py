@@ -140,7 +140,8 @@ def _extract_passages_from_pdf_bytes(paper_id: str, pdf_bytes: bytes) -> list[Pa
         import fitz  # PyMuPDF
 
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        total_pages = min(len(doc), 30)  # max 30 pages
+        max_doc_pages = getattr(settings, "MAX_PDF_PAGES", 100)
+        total_pages = min(len(doc), max_doc_pages) if max_doc_pages > 0 else len(doc)
 
         # 1. Identify common headers/footers to filter
         first_lines = []

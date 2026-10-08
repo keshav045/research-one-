@@ -1006,7 +1006,7 @@ def _parse_openalex_work(w: dict) -> Optional[Paper]:
 
 async def _fetch_openalex_query(query: str, limit: int = 50) -> list[Paper]:
     """Fetch top papers from OpenAlex sorted by cited_by_count descending."""
-    clean_q = query.strip()
+    clean_q = re.sub(r"[?*]", "", query).strip()
     if not clean_q:
         return []
 
@@ -1019,8 +1019,10 @@ async def _fetch_openalex_query(query: str, limit: int = 50) -> list[Paper]:
         "search": clean_q,
         "sort": "cited_by_count:desc",
         "per_page": min(limit, 50),
-        "mailto": getattr(settings, "OPENALEX_EMAIL", "researchlens.tool@gmail.com"),
     }
+    email = getattr(settings, "OPENALEX_EMAIL", "") or ""
+    if email.strip():
+        params["mailto"] = email.strip()
     if filter_val:
         params["filter"] = filter_val
     headers = {}
