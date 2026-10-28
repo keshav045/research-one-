@@ -12,8 +12,8 @@ from ..models.schemas import ResearchReport
 from .text_utils import split_into_sentences
 
 RAW_ERROR_PATTERNS = [
-    re.compile(r"\bHTTP\b", re.IGNORECASE),
-    re.compile(r"\b429\b"),
+    re.compile(r"\bHTTP\s+[45]\d{2}\b"),  # Only flag actual HTTP 4xx/5xx error codes, not protocol mentions
+    re.compile(r"\b(?:status|code|error)\s*[:=]?\s*429\b", re.IGNORECASE),
     re.compile(r'all:"'),
     re.compile(r"\bTraceback\b", re.IGNORECASE),
 ]

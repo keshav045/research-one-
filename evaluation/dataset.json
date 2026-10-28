@@ -3,90 +3,377 @@
     "id": "bench-01-transformer",
     "question": "Which paper introduced the Transformer architecture, and what was its key idea?",
     "domain": "Machine Learning / NLP",
+    "question_type": "factual_lookup",
+    "difficulty": "easy",
     "expected_arxiv": ["1706.03762"],
     "expected_dois": ["10.48550/arxiv.1706.03762"],
     "expected_titles": ["Attention Is All You Need"],
-    "expected_facets": ["Self-Attention", "Transduction", "Recurrence", "Multi-Head Attention"]
+    "expected_facets": ["Self-Attention", "Transduction", "Recurrence", "Multi-Head Attention"],
+    "notes": "Landmark paper; high citation count, well-indexed on all sources."
   },
   {
     "id": "bench-02-rag",
     "question": "What is retrieval-augmented generation and who proposed it?",
     "domain": "Information Retrieval / NLP",
+    "question_type": "factual_lookup",
+    "difficulty": "easy",
     "expected_arxiv": ["2005.11401"],
     "expected_dois": ["10.48550/arxiv.2005.11401"],
     "expected_titles": ["Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks"],
-    "expected_facets": ["Retrieval Augmented Generation", "Parametric Memory", "Dense Passage Retrieval"]
+    "expected_facets": ["Retrieval Augmented Generation", "Parametric Memory", "Dense Passage Retrieval"],
+    "notes": "Tests NLP retrieval domain."
   },
   {
     "id": "bench-03-bert",
     "question": "Which paper introduced BERT for language representation?",
     "domain": "Machine Learning / NLP",
+    "question_type": "factual_lookup",
+    "difficulty": "easy",
     "expected_arxiv": ["1810.04805"],
     "expected_dois": ["10.48550/arxiv.1810.04805"],
     "expected_titles": ["BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding"],
-    "expected_facets": ["Bidirectional Transformers", "Masked Language Model", "Next Sentence Prediction"]
+    "expected_facets": ["Bidirectional Transformers", "Masked Language Model", "Next Sentence Prediction"],
+    "notes": "High-citation, heavily duplicated across sources."
   },
   {
     "id": "bench-04-resnet",
     "question": "Which paper introduced deep residual learning and skip connections in CNNs?",
     "domain": "Computer Vision",
+    "question_type": "factual_lookup",
+    "difficulty": "easy",
     "expected_arxiv": ["1512.03385"],
     "expected_dois": ["10.48550/arxiv.1512.03385"],
     "expected_titles": ["Deep Residual Learning for Image Recognition"],
-    "expected_facets": ["Residual Learning", "Skip Connections", "Deep Neural Networks"]
+    "expected_facets": ["Residual Learning", "Skip Connections", "Deep Neural Networks"],
+    "notes": "Computer Vision landmark."
   },
   {
     "id": "bench-05-adam",
     "question": "Which paper proposed the Adam optimizer for stochastic gradient descent?",
     "domain": "Optimization / Machine Learning",
+    "question_type": "factual_lookup",
+    "difficulty": "easy",
     "expected_arxiv": ["1412.6980"],
     "expected_dois": ["10.48550/arxiv.1412.6980"],
     "expected_titles": ["Adam: A Method for Stochastic Optimization"],
-    "expected_facets": ["First-Order Gradients", "Adaptive Moment Estimation", "Stochastic Optimization"]
+    "expected_facets": ["First-Order Gradients", "Adaptive Moment Estimation", "Stochastic Optimization"],
+    "notes": "Optimization landmark."
   },
   {
     "id": "bench-06-gan",
     "question": "Who introduced generative adversarial networks?",
     "domain": "Generative AI",
+    "question_type": "factual_lookup",
+    "difficulty": "easy",
     "expected_arxiv": ["1406.2661"],
     "expected_dois": ["10.48550/arxiv.1406.2661"],
     "expected_titles": ["Generative Adversarial Nets"],
-    "expected_facets": ["Minimax Game", "Discriminative Model", "Generative Model"]
+    "expected_facets": ["Minimax Game", "Discriminative Model", "Generative Model"],
+    "notes": "Classic GAN paper."
   },
   {
     "id": "bench-07-lora",
     "question": "Which paper introduced LoRA for parameter-efficient fine-tuning of large language models?",
     "domain": "LLM Efficiency",
+    "question_type": "factual_lookup",
+    "difficulty": "easy",
     "expected_arxiv": ["2106.09685"],
     "expected_dois": ["10.48550/arxiv.2106.09685"],
     "expected_titles": ["LoRA: Low-Rank Adaptation of Large Language Models"],
-    "expected_facets": ["Low-Rank Adaptation", "Parameter-Efficient", "Weight Matrices"]
+    "expected_facets": ["Low-Rank Adaptation", "Parameter-Efficient", "Weight Matrices"],
+    "notes": "Tests parameter-efficient fine-tuning domain."
   },
   {
     "id": "bench-08-vit",
     "question": "Which paper introduced Vision Transformers (ViT) applying self-attention directly to image patches?",
     "domain": "Computer Vision",
+    "question_type": "factual_lookup",
+    "difficulty": "easy",
     "expected_arxiv": ["2010.11929"],
     "expected_dois": ["10.48550/arxiv.2010.11929"],
     "expected_titles": ["An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale"],
-    "expected_facets": ["Image Patches", "Self-Attention", "Image Recognition"]
+    "expected_facets": ["Image Patches", "Self-Attention", "Image Recognition"],
+    "notes": "Tests vision + NLP intersection."
   },
   {
     "id": "bench-09-latent-diffusion",
     "question": "Which paper introduced Latent Diffusion Models for high-resolution image synthesis?",
     "domain": "Generative AI / Vision",
+    "question_type": "factual_lookup",
+    "difficulty": "medium",
     "expected_arxiv": ["2112.10752"],
     "expected_dois": ["10.48550/arxiv.2112.10752"],
     "expected_titles": ["High-Resolution Image Synthesis with Latent Diffusion Models"],
-    "expected_facets": ["Latent Diffusion", "Perceptual Compression", "Cross-Attention"]
+    "expected_facets": ["Latent Diffusion", "Perceptual Compression", "Cross-Attention"],
+    "notes": "Stable diffusion ancestor paper."
   },
   {
     "id": "bench-10-crispr",
     "question": "How does CRISPR-Cas9 genome editing repair double-strand breaks in eukaryotic cells?",
     "domain": "Molecular Biology",
+    "question_type": "factual_lookup",
+    "difficulty": "medium",
     "expected_arxiv": [],
     "expected_dois": ["10.1126/science.1225829"],
     "expected_titles": ["A Programmable Dual-RNA-Guided DNA Endonuclease in Adaptive Bacterial Immunity"],
-    "expected_facets": ["Non-Homologous End Joining", "Homology-Directed Repair", "Double-Strand Breaks"]
+    "expected_facets": ["Non-Homologous End Joining", "Homology-Directed Repair", "Double-Strand Breaks"],
+    "notes": "Non-ML biology query for domain generalization test."
+  },
+  {
+    "id": "bench-11-gpt3",
+    "question": "What were the main findings of the GPT-3 paper on few-shot learners?",
+    "domain": "Machine Learning / NLP",
+    "question_type": "factual_lookup",
+    "difficulty": "easy",
+    "expected_arxiv": ["2005.14165"],
+    "expected_dois": ["10.48550/arxiv.2005.14165"],
+    "expected_titles": ["Language Models are Few-Shot Learners"],
+    "expected_facets": ["Few-Shot Learning", "In-Context Learning", "Language Models"],
+    "notes": "GPT-3 foundational paper."
+  },
+  {
+    "id": "bench-12-llm-vs-rag",
+    "question": "How does retrieval-augmented generation compare to fine-tuning for knowledge-intensive NLP tasks?",
+    "domain": "Information Retrieval / NLP",
+    "question_type": "comparative",
+    "difficulty": "medium",
+    "expected_arxiv": ["2005.11401", "2002.08909"],
+    "expected_dois": ["10.48550/arxiv.2005.11401"],
+    "expected_titles": ["Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks"],
+    "expected_facets": ["RAG vs Fine-Tuning", "Open-Domain QA", "Knowledge Updates"],
+    "notes": "Comparative question requiring multiple papers."
+  },
+  {
+    "id": "bench-13-attention-mechanisms",
+    "question": "What are the main types of attention mechanisms used in modern neural networks?",
+    "domain": "Machine Learning / NLP",
+    "question_type": "literature_review",
+    "difficulty": "medium",
+    "expected_arxiv": ["1706.03762", "1508.04025"],
+    "expected_dois": [],
+    "expected_titles": ["Attention Is All You Need", "Neural Machine Translation by Jointly Learning to Align and Translate"],
+    "expected_facets": ["Self-Attention", "Cross-Attention", "Multi-Head Attention", "Soft Attention"],
+    "notes": "Survey-type question requiring synthesis from multiple papers."
+  },
+  {
+    "id": "bench-14-diffusion-models-survey",
+    "question": "What are the key differences between DDPM, DDIM, and score-based diffusion models?",
+    "domain": "Generative AI",
+    "question_type": "comparative",
+    "difficulty": "hard",
+    "expected_arxiv": ["2006.11239", "2010.02502", "2011.13456"],
+    "expected_dois": [],
+    "expected_titles": [
+      "Denoising Diffusion Probabilistic Models",
+      "Denoising Diffusion Implicit Models",
+      "Score-Based Generative Modeling through Stochastic Differential Equations"
+    ],
+    "expected_facets": ["DDPM", "DDIM", "Score Matching", "Stochastic Differential Equations"],
+    "notes": "Multi-paper comparative; tests conflicting evidence handling."
+  },
+  {
+    "id": "bench-15-graph-neural-networks",
+    "question": "Which paper introduced graph convolutional networks for semi-supervised classification?",
+    "domain": "Graph Machine Learning",
+    "question_type": "factual_lookup",
+    "difficulty": "medium",
+    "expected_arxiv": ["1609.02907"],
+    "expected_dois": ["10.48550/arxiv.1609.02907"],
+    "expected_titles": ["Semi-Supervised Classification with Graph Convolutional Networks"],
+    "expected_facets": ["Graph Convolution", "Semi-Supervised Learning", "Spectral Graph Theory"],
+    "notes": "Tests non-NLP machine learning domain."
+  },
+  {
+    "id": "bench-16-alphafold",
+    "question": "How does AlphaFold2 predict protein 3D structure from amino acid sequence?",
+    "domain": "Computational Biology",
+    "question_type": "factual_lookup",
+    "difficulty": "medium",
+    "expected_arxiv": [],
+    "expected_dois": ["10.1038/s41586-021-03819-2"],
+    "expected_titles": ["Highly accurate protein structure prediction with AlphaFold"],
+    "expected_facets": ["Evoformer", "Multiple Sequence Alignments", "Structure Module"],
+    "notes": "Cross-domain biology + AI paper; tests non-arXiv retrieval."
+  },
+  {
+    "id": "bench-17-flash-attention",
+    "question": "What technique does FlashAttention use to make self-attention IO-efficient?",
+    "domain": "LLM Efficiency / Systems",
+    "question_type": "factual_lookup",
+    "difficulty": "medium",
+    "expected_arxiv": ["2205.14135"],
+    "expected_dois": ["10.48550/arxiv.2205.14135"],
+    "expected_titles": ["FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness"],
+    "expected_facets": ["IO-Awareness", "Tiling", "SRAM", "Memory Bandwidth"],
+    "notes": "Systems-level ML optimization; tests technical domain specificity."
+  },
+  {
+    "id": "bench-18-reward-model",
+    "question": "How is reinforcement learning from human feedback (RLHF) used to align language models?",
+    "domain": "LLM Alignment",
+    "question_type": "literature_review",
+    "difficulty": "medium",
+    "expected_arxiv": ["2203.02155", "2009.01325"],
+    "expected_dois": [],
+    "expected_titles": [
+      "Training language models to follow instructions with human feedback",
+      "Learning to summarize from human feedback"
+    ],
+    "expected_facets": ["Reward Model", "PPO", "Human Preference", "Policy Optimization"],
+    "notes": "Tests RLHF literature synthesis."
+  },
+  {
+    "id": "bench-19-quantum-supremacy",
+    "question": "What experiment demonstrated quantum computational supremacy and how was it achieved?",
+    "domain": "Quantum Computing",
+    "question_type": "factual_lookup",
+    "difficulty": "medium",
+    "expected_arxiv": [],
+    "expected_dois": ["10.1038/s41586-019-1666-5"],
+    "expected_titles": ["Quantum supremacy using a programmable superconducting processor"],
+    "expected_facets": ["Sycamore Processor", "Random Circuit Sampling", "Fidelity"],
+    "notes": "Cross-domain physics/CS; tests OpenAlex retrieval."
+  },
+  {
+    "id": "bench-20-contrastive-learning",
+    "question": "Which paper introduced SimCLR for contrastive self-supervised learning of visual representations?",
+    "domain": "Computer Vision / Self-Supervised Learning",
+    "question_type": "factual_lookup",
+    "difficulty": "easy",
+    "expected_arxiv": ["2002.05709"],
+    "expected_dois": ["10.48550/arxiv.2002.05709"],
+    "expected_titles": ["A Simple Framework for Contrastive Learning of Visual Representations"],
+    "expected_facets": ["Contrastive Loss", "Data Augmentation", "Projection Head"],
+    "notes": "Self-supervised vision landmark."
+  },
+  {
+    "id": "bench-21-llm-inference-efficiency",
+    "question": "What are the main techniques for reducing memory and latency in large language model inference?",
+    "domain": "LLM Systems",
+    "question_type": "literature_review",
+    "difficulty": "hard",
+    "expected_arxiv": ["2205.14135", "2205.05198", "2306.00978"],
+    "expected_dois": [],
+    "expected_titles": [
+      "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness",
+      "Efficiently Scaling Transformer Inference",
+      "Efficient Memory Management for Large Language Model Serving with PagedAttention"
+    ],
+    "expected_facets": ["KV Cache", "Quantization", "Speculative Decoding", "PagedAttention"],
+    "notes": "Multi-paper survey; tests coverage breadth."
+  },
+  {
+    "id": "bench-22-sparse-transformers",
+    "question": "How do sparse attention patterns in Longformer differ from the full attention in the original Transformer?",
+    "domain": "Machine Learning / NLP",
+    "question_type": "comparative",
+    "difficulty": "hard",
+    "expected_arxiv": ["2004.05150"],
+    "expected_dois": ["10.48550/arxiv.2004.05150"],
+    "expected_titles": ["Longformer: The Long-Document Transformer"],
+    "expected_facets": ["Sliding Window Attention", "Global Attention", "Linear Complexity"],
+    "notes": "Tests subtle technical distinction; ambiguous evidence risk."
+  },
+  {
+    "id": "bench-23-molecular-dynamics",
+    "question": "What role does molecular dynamics simulation play in protein folding research?",
+    "domain": "Computational Chemistry / Biology",
+    "question_type": "literature_review",
+    "difficulty": "hard",
+    "expected_arxiv": [],
+    "expected_dois": [],
+    "expected_titles": [],
+    "expected_facets": ["Force Fields", "AMBER", "Folding Pathway", "CHARMM"],
+    "notes": "Non-ML domain with sparse open-access coverage; triggers coverage warning."
+  },
+  {
+    "id": "bench-24-scaling-laws",
+    "question": "What do the Chinchilla scaling laws say about optimal model and dataset sizes?",
+    "domain": "Machine Learning / LLM",
+    "question_type": "factual_lookup",
+    "difficulty": "medium",
+    "expected_arxiv": ["2203.15556"],
+    "expected_dois": ["10.48550/arxiv.2203.15556"],
+    "expected_titles": ["Training Compute-Optimal Large Language Models"],
+    "expected_facets": ["Chinchilla", "Compute-Optimal", "Token Budget", "Model Size"],
+    "notes": "Tests DeepMind paper retrieval (less on arXiv than others)."
+  },
+  {
+    "id": "bench-25-knowledge-distillation",
+    "question": "How does knowledge distillation from a large teacher model improve a smaller student model?",
+    "domain": "Model Compression",
+    "question_type": "literature_review",
+    "difficulty": "medium",
+    "expected_arxiv": ["1503.02531"],
+    "expected_dois": ["10.48550/arxiv.1503.02531"],
+    "expected_titles": ["Distilling the Knowledge in a Neural Network"],
+    "expected_facets": ["Soft Targets", "Temperature Scaling", "Teacher-Student"],
+    "notes": "Hinton et al. classic; tests model compression domain."
+  },
+  {
+    "id": "bench-26-mixture-of-experts",
+    "question": "Which paper introduced sparse mixture-of-experts layers for scaling language models?",
+    "domain": "LLM Architecture",
+    "question_type": "factual_lookup",
+    "difficulty": "medium",
+    "expected_arxiv": ["2101.03961"],
+    "expected_dois": ["10.48550/arxiv.2101.03961"],
+    "expected_titles": ["Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity"],
+    "expected_facets": ["Mixture of Experts", "Routing", "Sparse Activation", "Token Routing"],
+    "notes": "Tests large-model architecture retrieval."
+  },
+  {
+    "id": "bench-27-self-supervised-nlp",
+    "question": "How do masked language modeling and causal language modeling differ in self-supervised NLP pre-training?",
+    "domain": "Machine Learning / NLP",
+    "question_type": "comparative",
+    "difficulty": "medium",
+    "expected_arxiv": ["1810.04805", "2005.14165"],
+    "expected_dois": [],
+    "expected_titles": [
+      "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+      "Language Models are Few-Shot Learners"
+    ],
+    "expected_facets": ["Masked Language Model", "Causal Language Model", "Bidirectional Context"],
+    "notes": "Comparative; requires synthesis from BERT and GPT-3 papers."
+  },
+  {
+    "id": "bench-28-llm-hallucination",
+    "question": "What causes hallucination in large language models and how can it be mitigated?",
+    "domain": "LLM Reliability / Safety",
+    "question_type": "literature_review",
+    "difficulty": "hard",
+    "expected_arxiv": ["2202.03629", "2005.11401"],
+    "expected_dois": [],
+    "expected_titles": [],
+    "expected_facets": ["Factuality", "Grounding", "RLHF", "Retrieval Augmentation"],
+    "notes": "Survey; conflicting evidence from multiple authors; ambiguous literature."
+  },
+  {
+    "id": "bench-29-dna-sequencing",
+    "question": "What are the main differences between short-read and long-read DNA sequencing technologies?",
+    "domain": "Genomics / Bioinformatics",
+    "question_type": "comparative",
+    "difficulty": "hard",
+    "expected_arxiv": [],
+    "expected_dois": [],
+    "expected_titles": [],
+    "expected_facets": ["Illumina", "Oxford Nanopore", "PacBio", "Error Rate"],
+    "notes": "Non-ML biology; sparse open access; tests domain generalization."
+  },
+  {
+    "id": "bench-30-neural-architecture-search",
+    "question": "What techniques are used in neural architecture search to automate model design?",
+    "domain": "AutoML / Machine Learning",
+    "question_type": "literature_review",
+    "difficulty": "hard",
+    "expected_arxiv": ["1611.01578", "1802.03268"],
+    "expected_dois": [],
+    "expected_titles": [
+      "Neural Architecture Search with Reinforcement Learning",
+      "DARTS: Differentiable Architecture Search"
+    ],
+    "expected_facets": ["Reinforcement Learning", "DARTS", "Differentiable Search", "One-Shot NAS"],
+    "notes": "AutoML survey requiring multiple papers."
   }
 ]

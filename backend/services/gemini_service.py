@@ -50,35 +50,10 @@ GEMINI_MODEL_CHAIN = [
 _RETRYABLE_CODES = {"[429]", "[503]", "429", "503"}
 
 # ─── Question Type Classifier ─────────────────────────────────────────────────
-
-_FACTUAL_PATTERNS = re.compile(
-    r"\b("
-    r"which paper|who introduced|who proposed|who invented|what paper|"
-    r"when was|when did|what year|who first|who created|what was the first|"
-    r"who wrote|who published|what is the name|name the paper|name the author|"
-    r"cite the|what model introduced|what architecture introduced"
-    r")\b",
-    re.IGNORECASE,
-)
-
-_COMPARATIVE_PATTERNS = re.compile(
-    r"\b("
-    r"compar|benchmark|evaluat|versus|\bvs\b|trade.?off|ablation|"
-    r"performance|throughput|accuracy|state.of.the.art|sota|"
-    r"which is better|which performs|survey|review|overview"
-    r")\b",
-    re.IGNORECASE,
-)
-
-
-def _classify_question_type(question: str) -> str:
-    is_factual     = bool(_FACTUAL_PATTERNS.search(question))
-    is_comparative = bool(_COMPARATIVE_PATTERNS.search(question))
-    if is_factual and not is_comparative:
-        return "factual_lookup"
-    if is_comparative:
-        return "comparative_review"
-    return "comparative_review"
+# Import from query_planner to avoid duplicate logic that can diverge.
+# BUG-12 fix: was duplicated here with a different return value ("comparative_review"
+# vs "literature_review" in query_planner). Centralised in query_planner.
+from .query_planner import classify_question_type as _classify_question_type  # noqa: E402
 
 
 # ─── OpenAI API ───────────────────────────────────────────────────────────────
@@ -131,7 +106,7 @@ async def _call_qwen(model_name: str, prompt: str, retries: int = 2) -> str:
 
     for attempt in range(retries + 1):
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
+            result = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: client.chat.completions.create(
                     model=model_name,
@@ -175,7 +150,7 @@ async def _call_gemini(model_name: str, prompt: str, retries: int = 2) -> str:
 
     for attempt in range(retries + 1):
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
+            result = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: model.generate_content(prompt)
             )
             return result.text.strip()

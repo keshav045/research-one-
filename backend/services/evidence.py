@@ -12,6 +12,7 @@ Two-Tier Verification Architecture:
 from __future__ import annotations
 
 import logging
+import math
 import re
 from typing import List, Tuple, Optional, Dict
 
@@ -27,7 +28,6 @@ from ..models.schemas import (
 from ..config import settings
 from .vector_store import VectorStore, PassageRecord
 from .ranker import get_reranker
-import math
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ _CAPTION_REGEX = re.compile(
     re.IGNORECASE,
 )
 _AUTHOR_NOTE_REGEX = re.compile(
-    r"(\S+@\S+\.\S+|\b(?:correspondence to|equal contribution|work done while|department of|school of|university|institute of|laboratory of|author for correspondence|all authors contributed|corresponding author|e-mail:?)\b)",
+    r"(\S+@\S+\.\S+|\b(?:correspondence to|equal contribution|work done while|department of|school of|university|institute of|laboratory of|author for correspondence|all authors contributed|corresponding author|e-mail:?|crucially involved in every aspect|designed and implemented the first|spent long days|listing order is random|author contributions?)\b)",
     re.IGNORECASE,
 )
 _REFERENCE_REGEX = re.compile(
@@ -50,6 +50,10 @@ _META_PROCEDURAL_REGEX = re.compile(
     r"the\s+rest\s+of\s+(?:this\s+)?paper\s+is\s+organized|"
     r"as\s+(?:discussed|shown|detailed|noted|described|illustrated)\s+in\s+(?:section|table|figure|appendix)|"
     r"we\s+(?:organize|refer\s+the\s+reader|begin\s+by\s+describing|outline\s+the\s+structure))\b",
+    re.IGNORECASE,
+)
+_FIRST_PERSON_CONTRIB_REGEX = re.compile(
+    r"\b(?:we|our|this\s+paper|this\s+work|in\s+this\s+study|here\s+we)\b",
     re.IGNORECASE,
 )
 
@@ -235,7 +239,7 @@ def extract_and_verify_evidence(
         "procedural_fluff": 0,
     }
 
-    # 1. Retrieve top 5 passages per sub-question and extract candidate assertions
+    # 1. Retrieve candidate passages per sub-question and extract candidate assertions
     candidate_claims: List[Dict] = []
     seen_subq_claim_norms: set[str] = set()
 
@@ -304,13 +308,15 @@ def extract_and_verify_evidence(
 
             for sent in sentences[:3]:
                 # Author attribution alignment check:
-                # Detect if the sentence explicitly attributes work to an external author (e.g. "Lewis et al.", "Gao et al.")
+                # Only treat as external-only attribution when the sentence does NOT contain
+                # first-person contribution markers ("we", "our", "this paper", "this work").
                 ext_author_matches = re.findall(r"\b([A-Z][a-zA-Z\-]+)\s+(?:et\s+al\.?|\(\d{4}\))", sent)
+                has_own_contrib = bool(_FIRST_PERSON_CONTRIB_REGEX.search(sent))
                 target_rec = rec
                 target_passage_text = passage_text
                 target_score = sc
 
-                if ext_author_matches and rec_paper:
+                if ext_author_matches and rec_paper and not has_own_contrib:
                     # Check if the named author is an author of THIS paper
                     if not any(a.lower() in rec_authors_lower for a in ext_author_matches):
                         # Sentence is citing an external author! Check if that external author has a paper in our corpus
@@ -368,16 +374,23 @@ def extract_and_verify_evidence(
         return [], [], [], removal_counts
 
     # 2. Compute cross-encoder relevance scores for (sub_question, claim)
+    # Include paper title context when scoring anchor paper sentences so factual-lookup questions
+    # ("Which paper introduced X?") match architectural claims inside the anchor paper.
     if reranker is not None:
-        rel_pairs = [[c["sub_q"], c["sentence"]] for c in candidate_claims]
+        rel_pairs = []
+        for c in candidate_claims:
+            rec_p = paper_map.get(c["record"].paper_id)
+            is_anc = (anchor_paper_id and c["record"].paper_id == anchor_paper_id) or getattr(rec_p, "is_anchor", False)
+            if is_anc and rec_p:
+                rel_pairs.append([c["sub_q"], f"{rec_p.title}: {c['sentence']}"])
+            else:
+                rel_pairs.append([c["sub_q"], c["sentence"]])
         raw_rel = reranker.predict(rel_pairs)
         rel_scores = [1.0 / (1.0 + math.exp(-float(s))) for s in raw_rel]
     else:
         rel_scores = [0.5 for _ in candidate_claims]
 
     # 3. Plain Claim-Level Check: "source match" + Relevance Gate
-    # Replaces the NLI call on claims with a plain check that the claim sentence exists verbatim
-    # (after whitespace/hyphen normalization) in its source passage.
     rel_threshold = getattr(settings, "RELEVANCE_THRESHOLD", 0.30)
 
     verified_candidates = []
@@ -393,7 +406,9 @@ def extract_and_verify_evidence(
             continue
 
         is_source_match = check_verbatim_source_match(claim_text, p_text)
-        is_relevant = rel_score >= rel_threshold
+        is_anc = (anchor_paper_id and record.paper_id == anchor_paper_id) or getattr(paper, "is_anchor", False)
+        eff_threshold = min(rel_threshold, 0.15) if is_anc else rel_threshold
+        is_relevant = rel_score >= eff_threshold
 
         if is_relevant and is_source_match:
             verified_candidates.append({
@@ -409,7 +424,7 @@ def extract_and_verify_evidence(
             if not is_relevant and not is_source_match:
                 reason = "not relevant to sub-question and no verbatim source match"
             elif not is_relevant:
-                reason = f"not relevant to sub-question (relevance {rel_score:.3f} < {rel_threshold:.2f})"
+                reason = f"not relevant to sub-question (relevance {rel_score:.3f} < {eff_threshold:.2f})"
             else:
                 reason = "claim not found verbatim in source passage"
 
@@ -433,8 +448,14 @@ def extract_and_verify_evidence(
     )
 
     # 4. Deduplicate identical verified claims before ranking (Amendment C)
-    # Sort verified candidates by relevance score descending
-    verified_candidates.sort(key=lambda x: x["rel_score"], reverse=True)
+    # Sort verified candidates by relevance score descending (prioritizing anchor paper slightly)
+    verified_candidates.sort(
+        key=lambda x: (
+            1 if (anchor_paper_id and x["paper"].id == anchor_paper_id) else 0,
+            x["rel_score"],
+        ),
+        reverse=True,
+    )
 
     verified_citations: List[Citation] = []
     claims_list: List[Claim] = []

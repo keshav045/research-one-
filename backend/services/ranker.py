@@ -13,7 +13,7 @@ import math
 import re
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Any
 
 import httpx
@@ -375,14 +375,19 @@ async def citation_chasing(
     top_5_log = [f"'{ref_map[k].get('title')}' ({count}x cited, {ref_map[k].get('citationCount')} cites)" for k, count in top_5]
     logger.info("[CitationChasing] Top 5 most-referenced works found: %s", " | ".join(top_5_log) if top_5_log else "None")
 
+    existing_by_norm_title = {normalize_paper_title(c.title): c for c in candidates if c.title}
     chased_papers: list[Paper] = []
     for k, count in ref_counter.most_common(30):
         r = ref_map[k]
+        r_title = r.get("title") or "Untitled"
+        matched_existing = existing_by_norm_title.get(normalize_paper_title(r_title))
         ext_ids = r.get("externalIds") or {}
         arxiv_id = ext_ids.get("ArXiv")
-        doi = ext_ids.get("DOI")
-        clean_arxiv = re.sub(r"v\d+$", "", arxiv_id) if arxiv_id else None
-        pid = f"arxiv-{clean_arxiv}" if clean_arxiv else (f"s2-{r.get('paperId')}" if r.get("paperId") else f"chased-{len(chased_papers)+1}")
+        doi = ext_ids.get("DOI") or (matched_existing.doi if matched_existing else "")
+        clean_arxiv = re.sub(r"v\d+$", "", arxiv_id) if arxiv_id else (_extract_arxiv_id(matched_existing) if matched_existing else None)
+        pid = matched_existing.id if matched_existing else (
+            f"arxiv-{clean_arxiv}" if clean_arxiv else (f"s2-{r.get('paperId')}" if r.get("paperId") else f"chased-{len(chased_papers)+1}")
+        )
 
         fields = r.get("fieldsOfStudy") or []
         fields_str = ", ".join(fields) if isinstance(fields, list) else str(fields)
@@ -393,21 +398,28 @@ async def citation_chasing(
             for a in authors_raw
             if a
         ]
+        if not authors_list and matched_existing and matched_existing.authors:
+            authors_list = list(matched_existing.authors)
         if not authors_list:
             authors_list = ["Unknown"]
 
-        pdf_url = f"https://arxiv.org/pdf/{clean_arxiv}" if clean_arxiv else None
+        pdf_url = (matched_existing.pdfUrl if matched_existing and matched_existing.pdfUrl else None) or (
+            f"https://arxiv.org/pdf/{clean_arxiv}" if clean_arxiv else None
+        )
+        rich_abstract = r.get("abstract") or (matched_existing.abstract if matched_existing else None) or (
+            f"Foundational work referenced {count} times by top candidate papers in literature review."
+        )
 
         paper = Paper(
             id=pid,
-            title=r.get("title") or "Untitled",
+            title=r_title,
             authors=authors_list,
-            citationCount=r.get("citationCount") or 0,
-            publicationYear=r.get("year") or 2020,
-            journalConference=fields_str or "Computer Science",
+            citationCount=max(r.get("citationCount") or 0, getattr(matched_existing, "citationCount", 0) or 0),
+            publicationYear=r.get("year") or (matched_existing.publicationYear if matched_existing else 2020),
+            journalConference=(matched_existing.journalConference if matched_existing and matched_existing.journalConference else fields_str) or "Computer Science",
             doi=doi or "",
-            source="Semantic Scholar",
-            abstract=r.get("abstract") or f"Foundational work referenced {count} times by top candidate papers in literature review.",
+            source=matched_existing.source if matched_existing else "Semantic Scholar",
+            abstract=rich_abstract,
             pdfUrl=pdf_url,
         )
         setattr(paper, "_ref_count", count)
@@ -468,17 +480,26 @@ async def select_anchor_paper(
             "confidence_note": conf_note,
         }
 
-    # 1b. Exact title-guess match (>= min_citations)
+    # 1b. Exact or canonical prefix title-guess match (>= min_citations)
     valid_guesses = validate_title_guesses(title_guesses) if title_guesses else []
     if valid_guesses:
         norm_guesses = [normalize_paper_title(g) for g in valid_guesses if normalize_paper_title(g)]
         exact_matches: list[Paper] = []
         for p in papers:
             p_norm = normalize_paper_title(p.title)
-            if p_norm in norm_guesses and get_cites(p) >= min_citations:
+            if not p_norm or get_cites(p) < min_citations:
+                continue
+            is_guess_match = p_norm in norm_guesses or any(
+                len(g.split()) >= 4 and (p_norm.startswith(g) or g.startswith(p_norm))
+                for g in norm_guesses
+            )
+            if is_guess_match:
                 exact_matches.append(p)
         if exact_matches:
-            exact_matches.sort(key=lambda p: (get_cites(p), 1 if p.pdfUrl else 0), reverse=True)
+            exact_matches.sort(
+                key=lambda p: (not check_derivative_guard(p.title, question), get_cites(p), 1 if p.pdfUrl else 0),
+                reverse=True,
+            )
             best_anchor = exact_matches[0]
             conf = "high"
             conf_note = ""
@@ -504,10 +525,14 @@ async def select_anchor_paper(
     chased_papers, ref_counter, ref_citers = await citation_chasing(papers, key_terms)
     if chased_papers:
         existing_ids = {p.id for p in papers}
+        guess_norms_set = {normalize_paper_title(g) for g in (valid_guesses or []) if g}
         for cp in chased_papers:
             if cp.id not in existing_ids:
-                papers.append(cp)
-                existing_ids.add(cp.id)
+                cp_text = f"{cp.title} {cp.abstract or ''}"
+                cp_norm = normalize_paper_title(cp.title)
+                if cp_norm in guess_norms_set or any(_text_matches_key_term(cp_text, kt) for kt in key_terms):
+                    papers.append(cp)
+                    existing_ids.add(cp.id)
 
     n_candidates = max(len(papers), 1)
     term_weights: dict[str, float] = {}
@@ -601,7 +626,10 @@ async def select_anchor_paper(
     qualified_gated = [p for p in gated_candidates if get_cites(p) >= min_citations]
     gated_anchor: Optional[Paper] = None
     if qualified_gated:
-        qualified_gated.sort(key=lambda p: get_cites(p), reverse=True)
+        qualified_gated.sort(
+            key=lambda p: (not check_derivative_guard(p.title, question), get_cites(p)),
+            reverse=True,
+        )
         gated_anchor = qualified_gated[0]
         logger.info("[Anchor] Method (b) gated selected: '%s' (%d cites)", gated_anchor.title, get_cites(gated_anchor))
     else:
@@ -756,7 +784,7 @@ def filter_and_deduplicate(papers: list[Paper]) -> list[Paper]:
       - empty abstract (< 20 chars)
       - publication year in the future
     """
-    current_year = datetime.utcnow().year + 1
+    current_year = datetime.now(timezone.utc).year + 1
     key_to_paper: dict[str, Paper] = {}
     cleaned: list[Paper] = []
 
@@ -885,19 +913,39 @@ def rank_papers(
     # This prevents running 600+ BERT forward passes on CPU which takes 75+ seconds.
     max_rerank_candidates = max(target_count * 2, 20)
     if len(cleaned) > max_rerank_candidates:
-        q_tokens = {w for w in re.sub(r"[^\w\s]", "", question.lower()).split() if len(w) > 3}
+        _meta_stop = {
+            "which", "what", "who", "when", "where", "how", "why", "whose", "whom",
+            "paper", "papers", "introduced", "introducing", "introduce", "proposed", "propose",
+            "invented", "developed", "created", "architecture", "model", "models", "method",
+            "methods", "study", "approach", "work", "key", "idea", "ideas", "main", "findings",
+            "from", "with", "that", "this", "these", "those", "have", "were", "been", "does",
+        }
+        q_tokens = {
+            w for w in re.sub(r"[^\w\s]", "", question.lower()).split()
+            if len(w) > 2 and w not in _meta_stop
+        }
+        for tg in (title_guesses or []):
+            for w in re.sub(r"[^\w\s]", "", tg.lower()).split():
+                if len(w) > 2 and w not in _meta_stop:
+                    q_tokens.add(w)
+        guess_norms = {normalize_paper_title(tg) for tg in (title_guesses or []) if tg}
         anchor_id = anchor_paper.id if anchor_paper else None
         anchor_norm = normalize_paper_title(anchor_paper.title) if anchor_paper else ""
 
         def _pre_rank_score(p: Paper) -> float:
-            if anchor_id and (p.id == anchor_id or normalize_paper_title(p.title) == anchor_norm):
+            p_norm = normalize_paper_title(p.title)
+            if anchor_id and (p.id == anchor_id or p_norm == anchor_norm):
                 return 1e6
+            if p_norm in guess_norms:
+                return 5e5
             t_lower = p.title.lower()
             a_lower = (p.abstract or "").lower()
             overlap = sum(1 for w in q_tokens if w in t_lower) * 3.0 + sum(1 for w in q_tokens if w in a_lower) * 0.5
             cites = max(0, getattr(p, "citationCount", 0) or 0)
             if overlap == 0:
-                # Citations alone cannot promote a paper that has ZERO relevant question words (e.g. Data clustering 1999)
+                # Preserve high-citation landmark candidates when surface terminology differs (e.g. word2vec -> vector space)
+                if question_type == "factual_lookup" and cites >= getattr(settings, "ANCHOR_MIN_CITATIONS", 1000):
+                    return math.log1p(cites) * 0.5
                 return 0.0
             return overlap + math.log1p(cites)
 
@@ -961,7 +1009,7 @@ def rank_papers(
         title_match_bonus = 0.0
 
         for tg in title_guess_normalized:
-            if tg and tg in title_norm:
+            if tg and (title_norm == tg or (len(tg) >= 15 and title_norm.startswith(tg) and not title_norm[len(tg):].startswith(("in", "for", "on", "with", "via")))):
                 title_match_bonus = 1.0
                 break
 
@@ -1088,7 +1136,11 @@ def rank_papers(
         ranked = final_ranked
     else:
         # Filter papers with minimum relevance threshold, but backfill up to target_count
+        # Tag above-threshold papers as primary evidence; below-threshold as background context.
+        BACKFILL_FLOOR = max(0.30, min_relevance * 0.70)  # Never backfill below 30% relevance
         relevant_pool = [p for p in ranked_pool if getattr(p, "relevance_score", 0.0) >= min_relevance]
+        for p in relevant_pool:
+            p.is_background = False
         if len(relevant_pool) >= target_count:
             ranked = relevant_pool[:target_count]
         else:
@@ -1100,31 +1152,38 @@ def rank_papers(
                 if len(ranked) >= target_count:
                     break
                 if p.id not in seen_ids:
-                    # Enforce relevance floor: never backfill manifestly irrelevant / off-topic papers
-                    # (e.g. Data clustering 1999 with 0 question keyword overlap in a RAG query)
                     paper_text = (p.title + " " + (p.abstract or "")).lower()
                     has_q_overlap = any(w in paper_text for w in q_tokens_set) if q_tokens_set else True
-                    if getattr(p, "relevance_score", 0.0) < 0.20 and not has_q_overlap:
+                    rel = getattr(p, "relevance_score", 0.0)
+                    # Enforce hard floor: never backfill papers with negligible relevance + no keyword overlap
+                    if rel < BACKFILL_FLOOR and not has_q_overlap:
+                        logger.debug(
+                            "[Ranker] Excluded from backfill (score=%.3f, no q-overlap): '%s'",
+                            rel, p.title[:60],
+                        )
                         continue
+                    # Mark as background context so synthesis can label it correctly
+                    p.is_background = True
                     ranked.append(p)
                     seen_ids.add(p.id)
 
             # If still empty after backfill, safely use top candidates from pool
             if not ranked:
                 ranked = list(ranked_pool[:target_count])
+                for p in ranked:
+                    p.is_background = True  # type: ignore[attr-defined]
 
-            if relevant_pool:
+            bg_count = sum(1 for p in ranked if getattr(p, "is_background", False))
+            if bg_count:
+                logger.warning(
+                    "[Ranker] %d of %d final papers are background context (below %.2f threshold) — "
+                    "they will not be used as primary evidence sources.",
+                    bg_count, len(ranked), min_relevance,
+                )
+            elif relevant_pool:
                 logger.info(
                     "[Ranker] Only %d candidate paper(s) met strict threshold (%.2f); backfilled up to %d papers from pool.",
-                    len(relevant_pool),
-                    min_relevance,
-                    len(ranked),
-                )
-            else:
-                logger.info(
-                    "[Ranker] No candidate papers met strict threshold (%.2f); using top %d candidates from pool.",
-                    min_relevance,
-                    len(ranked),
+                    len(relevant_pool), min_relevance, len(ranked),
                 )
 
     if not ranked:

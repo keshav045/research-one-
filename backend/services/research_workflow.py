@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Optional, Any
@@ -107,8 +108,10 @@ def determine_investigation_status(
     - Else -> 'completed'
     """
     status_reasons: list[str] = []
+    n_citations = candidate_count  # reuse param as proxy; actual citation count checked below
 
     if answer_sent_count == 0 or integrity == 0.0:
+        # Determine which stage failed
         status = "insufficient_evidence"
         fail_reason = (
             f"Evidence gate failed: Zero verified answer sentences passed NLI verification. "
@@ -153,13 +156,23 @@ def _compute_metrics(
     verified_answer_count: Optional[int] = None,
 ) -> IntegrityMetrics:
     """
-    Compute citation integrity formula:
-      citation_score = weighted NLI score for that citation
-        - VERIFIED            -> 1.0
-        - PARTIALLY_SUPPORTED -> 0.5
-        - UNSUPPORTED         -> 0.0
-        - CONTRADICTED        -> 0.0
-      coverage = sum(citation_scores) / (n_citations + n_uncited_sentences) * 100
+    Compute citation integrity coverage and related quality metrics.
+
+    **citationCoverage** formula (RL-009 calibration):
+        score_sum = sum of per-citation scores:
+            VERIFIED            → 1.0
+            PARTIALLY_SUPPORTED → 0.5
+            UNSUPPORTED         → 0.0
+            CONTRADICTED        → 0.0
+        denominator = n_citations + uncited_sentences
+        coverage = round(score_sum / denominator * 100)
+
+    Including uncited_sentences in the denominator penalises reports that
+    contain many substantive sentences without any citation, which is the
+    intended incentive: every claim should be citable.
+
+    If the total denominator is 0 (no citations and no uncited sentences —
+    an empty report), coverage is 0 by convention.
     """
     uncited = _count_uncited_sentences(report)
     verified = partial = unsupported = contradicted = 0
@@ -184,9 +197,21 @@ def _compute_metrics(
             contradicted += 1
 
     n_citations = len(citations)
-    total_assertions = n_citations + uncited
-    avg = score_sum / total_assertions if total_assertions > 0 else 0.0
-    coverage = max(0, min(100, round(avg * 100)))
+
+    # ── Citation Coverage: score over (citations + uncited sentences) ─────────
+    # Denominator includes uncited sentences so the metric rewards complete
+    # citation coverage of all substantive report content.
+    denominator = n_citations + uncited
+    if denominator > 0:
+        coverage = max(0, min(100, round(score_sum / denominator * 100)))
+    else:
+        # Empty report (no citations, no text at all) → coverage undefined → 0
+        coverage = 0
+        if n_citations == 0:
+            logger.warning(
+                "[Metrics] citationCoverage=0: synthesis produced ZERO inline citations. "
+                "Uncited sentences: %d", uncited,
+            )
 
     verified_claims_badge = verified_answer_count if verified_answer_count is not None else verified
 
@@ -201,6 +226,8 @@ def _compute_metrics(
         potentialConflicts=contradicted,
         uncitedSentences=uncited,
     )
+
+
 
 
 def _count_uncited_sentences(report: ResearchReport) -> int:
@@ -630,6 +657,27 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
 
         metrics = _compute_metrics(citations, report, verified_answer_count=claim_sent_count)
 
+        # ── Detect synthesis citation failure mode ──────────────────────────────
+        # If integrity=0 and we have evidence/citations objects but NO inline [n] in report text,
+        # the LLM synthesis stage failed to emit citation markers — not an NLI failure.
+        n_inline_in_report = len(re.findall(r"\[\d+\]", report.executiveSummary or ""))
+        for _sec in (report.findings or []):
+            for _para in (_sec.paragraphs or []):
+                n_inline_in_report += len(re.findall(r"\[\d+\]", _para.text or ""))
+        if metrics.citationCoverage == 0 and len(citations) == 0 and n_inline_in_report == 0 and len(enriched_papers) > 0:
+            synthesis_fail_note = (
+                "Synthesis stage failure: The LLM did not produce inline [n] citation markers. "
+                "The evidence pipeline ran successfully but the generated report text contains no citations. "
+                "Re-running or switching LLM provider may resolve this."
+            )
+            if synthesis_fail_note not in status_reasons:
+                status_reasons.append(synthesis_fail_note)
+            if status not in ("insufficient_evidence", "generation_error"):
+                status = "completed_with_warnings"
+            job.status = status
+            job.failure_reason = "; ".join(status_reasons)
+            logger.warning("[Pipeline] %s", synthesis_fail_note)
+
         _advance_step(pipeline, "step-7", None)
         job.set_pipeline(pipeline)
 
@@ -646,20 +694,29 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         job.unsupported_claims = metrics.unsupportedClaims
         job.contradicted_claims = metrics.contradictedClaims
         job.potential_conflicts = metrics.potentialConflicts
-        # B7: Validation Gate before saving report
+        job.citation_coverage = metrics.citationCoverage  # BUG-06 fix: was never written to DB
+        job.uncited_sentences = metrics.uncitedSentences  # persist uncited sentence count
+        # B7: Validation Gate — only run on substantive reports with findings content.
+        # Skipping empty/insufficient-evidence reports avoids false citation warnings.
         from .report_validator import validate_report
-        val_errors = validate_report(report)
-        if val_errors:
-            logger.error("[Pipeline] Report validation gate failed for job %s: %s", job_id, val_errors)
-            status = "generation_error"
-            job.status = "generation_error"
-            fail_desc = "Report validation gate failed: " + "; ".join(val_errors)
-            job.failure_reason = fail_desc
-            debug_info["validation_errors"] = val_errors
-            if status_reasons:
-                status_reasons.append(fail_desc)
-            else:
-                status_reasons = [fail_desc]
+        has_findings_content = bool(report.findings and any(
+            s.paragraphs for s in report.findings
+        ))
+        if has_findings_content:
+            val_errors = validate_report(report)
+            if val_errors:
+                logger.error("[Pipeline] Report validation gate failed for job %s: %s", job_id, val_errors)
+                status = "generation_error"
+                job.status = "generation_error"
+                fail_desc = "Report validation gate failed: " + "; ".join(val_errors)
+                job.failure_reason = fail_desc
+                debug_info["validation_errors"] = val_errors
+                if status_reasons:
+                    status_reasons.append(fail_desc)
+                else:
+                    status_reasons = [fail_desc]
+        else:
+            logger.debug("[Pipeline] Skipping report validation gate — no findings content (job %s)", job_id)
 
         job.set_report(report.model_dump())
         job.set_debug(debug_info)

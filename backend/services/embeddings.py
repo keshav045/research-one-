@@ -26,8 +26,12 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import torch
-import torch.nn.functional as F
+try:
+    import torch
+    import torch.nn.functional as F
+except ImportError:
+    torch = None  # type: ignore[assignment]
+    F = None  # type: ignore[assignment]
 
 from ..config import settings
 
@@ -94,6 +98,7 @@ def _compute_cache_key(model_name: str, max_length: int, text: str) -> str:
 def _lookup_disk_cache(keys: list[str]) -> dict[str, np.ndarray]:
     if not keys or not getattr(settings, "EMBED_CACHE_ENABLED", True):
         return {}
+    conn = None
     try:
         conn = _get_cache_db_conn()
         cur = conn.cursor()
@@ -110,16 +115,19 @@ def _lookup_disk_cache(keys: list[str]) -> dict[str, np.ndarray]:
                 arr = np.frombuffer(blob, dtype=np.float32)
                 if arr.size == dim:
                     found[k] = arr.copy()
-        conn.close()
         return found
     except Exception as exc:
         logger.warning("[EmbeddingsCache] Read failed: %s", exc)
         return {}
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _save_disk_cache(entries: list[tuple[str, np.ndarray]]) -> None:
     if not entries or not getattr(settings, "EMBED_CACHE_ENABLED", True):
         return
+    conn = None
     try:
         conn = _get_cache_db_conn()
         rows = [(k, arr.tobytes(), int(arr.size)) for k, arr in entries]
@@ -128,9 +136,11 @@ def _save_disk_cache(entries: list[tuple[str, np.ndarray]]) -> None:
             rows,
         )
         conn.commit()
-        conn.close()
     except Exception as exc:
         logger.warning("[EmbeddingsCache] Write failed: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 # ── Model Initialization & Quantization ───────────────────────────────────────
@@ -149,8 +159,6 @@ def get_model():
     if _model is not None:
         return _tokenizer, _model
 
-    from transformers import AutoTokenizer, AutoModel
-
     if hasattr(settings, "TORCH_NUM_THREADS") and settings.TORCH_NUM_THREADS > 0:
         try:
             torch.set_num_threads(settings.TORCH_NUM_THREADS)
@@ -166,6 +174,7 @@ def get_model():
 
     for model_name in dict.fromkeys(models_to_try):
         try:
+            from transformers import AutoTokenizer, AutoModel
             logger.info("[Embeddings] Trying embedding model: %s", model_name)
             _tokenizer = AutoTokenizer.from_pretrained(model_name)
             _model = AutoModel.from_pretrained(model_name)
@@ -186,7 +195,9 @@ def get_model():
         except Exception as exc:
             logger.warning("[Embeddings] Failed loading %s: %s", model_name, exc)
 
-    raise RuntimeError("Failed to load any embedding model from the candidate list")
+    logger.warning("[Embeddings] Using deterministic 384-dim hashing fallback (transformers/model unavailable).")
+    _active_model_name = settings.EMBEDDING_MODEL
+    return None, None
 
 
 def _pool(token_embeddings: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
@@ -330,20 +341,39 @@ def embed_texts(
     sorted_texts = [uncached_texts[i] for i in sort_order]
 
     sorted_batch_embeddings: list[np.ndarray] = []
-    for i in range(0, len(sorted_texts), batch_size):
-        batch = [t[:1000] for t in sorted_texts[i : i + batch_size]]
-        inputs = tokenizer(
-            batch,
-            padding=True,
-            truncation=True,
-            max_length=effective_max_length,
-            return_tensors="pt",
-        )
-        with torch.no_grad():
-            outputs = model(**inputs)
-            pooled = _pool(outputs.last_hidden_state, inputs["attention_mask"])
-            normalized = F.normalize(pooled, p=2, dim=1)
-            sorted_batch_embeddings.append(normalized.cpu().numpy().astype(np.float32))
+    if tokenizer is not None and model is not None and torch is not None and F is not None:
+        for i in range(0, len(sorted_texts), batch_size):
+            batch = [t[:1000] for t in sorted_texts[i : i + batch_size]]
+            inputs = tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=effective_max_length,
+                return_tensors="pt",
+            )
+            with torch.no_grad():
+                outputs = model(**inputs)
+                pooled = _pool(outputs.last_hidden_state, inputs["attention_mask"])
+                normalized = F.normalize(pooled, p=2, dim=1)
+                sorted_batch_embeddings.append(normalized.cpu().numpy().astype(np.float32))
+    else:
+        import re
+        for t in sorted_texts:
+            vec = np.zeros(384, dtype=np.float32)
+            tokens = re.findall(r"[a-z0-9]+", (t or "").lower())
+            if not tokens:
+                tokens = ["empty"]
+            for tok in tokens:
+                h = int(hashlib.md5(tok.encode("utf-8")).hexdigest()[:8], 16)
+                idx = h % 384
+                sign = 1.0 if ((h >> 8) & 1) == 0 else -1.0
+                vec[idx] += sign
+            norm = float(np.linalg.norm(vec))
+            if norm > 0:
+                vec = vec / norm
+            else:
+                vec[0] = 1.0
+            sorted_batch_embeddings.append(vec.reshape(1, 384))
 
     sorted_embs = np.vstack(sorted_batch_embeddings)
     dim = sorted_embs.shape[1]

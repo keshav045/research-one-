@@ -75,15 +75,8 @@ if "backend.config" not in sys.modules:
 
 
 def _run_async(coro):
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+    """Run an async coroutine to completion in a fresh event loop (safe across Python 3.10+)."""
+    return asyncio.run(coro)
 
 # Now safe to import the module under test
 from backend.services.paper_retrieval import (  # noqa: E402

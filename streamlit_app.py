@@ -33,13 +33,16 @@ import streamlit as st
 # ── Defensive Compatibility Patch for torch.accelerator ─────────────────────────
 # In torch < 2.6, torch.accelerator does not exist. Transformers 4.49+ calls
 # torch.accelerator.current_accelerator() during import, causing an AttributeError.
-import torch
-if not hasattr(torch, "accelerator"):
-    class _DummyAccelerator:
-        @staticmethod
-        def current_accelerator():
-            return None
-    torch.accelerator = _DummyAccelerator()
+try:
+    import torch
+    if not hasattr(torch, "accelerator"):
+        class _DummyAccelerator:
+            @staticmethod
+            def current_accelerator():
+                return None
+        torch.accelerator = _DummyAccelerator()
+except ImportError:
+    torch = None  # type: ignore[assignment]
 
 # ── Logging Setup ──────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -593,7 +596,10 @@ with st.sidebar:
 # ── 8. Main Application Interface ─────────────────────────────────────────────
 
 # Navigation Tabs
-tab_research, tab_history = st.tabs(["Research Workspace", "Investigation History"])
+tab_research, tab_history = st.tabs([
+    "Research Workspace",
+    "Investigation History",
+])
 
 with tab_research:
     st.header("Autonomous Academic Literature Synthesis")
@@ -754,7 +760,7 @@ with tab_research:
                     )
                     st.session_state["current_job_id"] = new_job_id
                     break
-                elif current_status == "failed":
+                elif current_status in ("failed", "generation_error"):
                     fail_msg = current_job.failure_reason or current_job.error_message or "Unknown failure"
                     status_box.update(
                         label=f"Pipeline Execution Failed: {fail_msg}",
@@ -764,9 +770,13 @@ with tab_research:
                     st.session_state["current_job_id"] = new_job_id
                     break
 
-                # Safety check if thread died unexpectedly
-                if not worker_thread.is_alive() and current_status == "in_progress":
-                    status_box.update(label="Worker thread terminated unexpectedly.", state="error", expanded=True)
+                # Safety check if thread finished or died with any non-handled status
+                if not worker_thread.is_alive():
+                    status_box.update(
+                        label=f"Investigation Finished ({current_status})",
+                        state="complete" if current_status in ("completed", "completed_with_warnings") else "error",
+                        expanded=True,
+                    )
                     st.session_state["current_job_id"] = new_job_id
                     break
 
@@ -798,6 +808,7 @@ with tab_research:
                     "completed": ("COMPLETED", "badge-status-completed"),
                     "completed_with_warnings": ("VERIFIED (WARNS)", "badge-status-completed_with_warnings"),
                     "insufficient_evidence": ("INSUFFICIENT", "badge-status-insufficient_evidence"),
+                    "generation_error": ("GEN ERROR", "badge-status-failed"),
                     "failed": ("FAILED", "badge-status-failed"),
                     "in_progress": ("IN PROGRESS", "badge-status-in_progress"),
                 }
@@ -1160,7 +1171,7 @@ with tab_research:
                     st.json(investigation.debug.get("plan", {}))
 
 
-# ── 9. Investigation History Tab ──────────────────────────────────────────────
+# ── 9. Investigation History Tab ─────────────────────────────────────────────
 with tab_history:
     st.header("Investigation History")
     st.caption("Review previous research investigations stored in the local SQLite database.")

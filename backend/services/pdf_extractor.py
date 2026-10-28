@@ -3,8 +3,15 @@ PDF Extraction Service — PyMuPDF
 =================================
 Downloads candidate paper PDFs with caching and size limits.
 Extracts clean full-text per page, strips headers/footers and references sections,
-and chunks text into 3-sentence overlapping windows tagged with page numbers and sections.
+and chunks text using a hybrid strategy:
+  1. Section-aware splitting on detected headings
+  2. Paragraph-aware splitting within each section (double-newline boundaries)
+  3. 3-sentence sliding windows with 1-sentence overlap for remaining prose
+All passages carry page, section, and char_offset metadata.
 Falls back to abstract when PDF download/parse is unavailable.
+
+Audit: RL-007 — extraction no longer hard-caps pages before ranking;
+        RL-008 — section/paragraph-aware chunks replace purely sentence-based windowing.
 """
 
 from __future__ import annotations
@@ -37,33 +44,24 @@ def _cache_path(url: str) -> Path:
     return PDF_CACHE / f"{digest}.pdf"
 
 
+import threading
 import time
 
 _last_arxiv_download_time: float = 0.0
-_arxiv_download_lock_inst: Optional[asyncio.Lock] = None
-_arxiv_download_loop: Optional[asyncio.AbstractEventLoop] = None
-
-
-def _get_arxiv_download_lock() -> asyncio.Lock:
-    global _arxiv_download_lock_inst, _arxiv_download_loop
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if _arxiv_download_lock_inst is None or _arxiv_download_loop != loop:
-        _arxiv_download_lock_inst = asyncio.Lock()
-        _arxiv_download_loop = loop
-    return _arxiv_download_lock_inst
+_arxiv_throttle_lock = threading.Lock()
 
 
 async def _throttle_arxiv_download():
-    """Ensure at least 3.0 seconds between arXiv requests."""
+    """Ensure at least 3.0 seconds between arXiv requests (thread-safe, loop-safe)."""
     global _last_arxiv_download_time
-    async with _get_arxiv_download_lock():
+    # Use a threading lock to safely read/write the shared float across coroutines.
+    # asyncio.sleep is called *outside* the lock so other coroutines can run.
+    with _arxiv_throttle_lock:
         now = time.time()
-        elapsed = now - _last_arxiv_download_time
-        if elapsed < 3.0:
-            await asyncio.sleep(3.0 - elapsed)
+        wait_needed = 3.0 - (now - _last_arxiv_download_time)
+    if wait_needed > 0:
+        await asyncio.sleep(wait_needed)
+    with _arxiv_throttle_lock:
         _last_arxiv_download_time = time.time()
 
 
@@ -128,135 +126,224 @@ def _split_into_sentences(text: str) -> list[str]:
     return sentences
 
 
+# ── Section heading patterns (RL-008: section-aware chunking) ─────────────────
+_SECTION_RE = re.compile(
+    r"^(?:\d+\.?\s+)?(Abstract|Introduction|Related Work|Background|Methodology|"
+    r"Method(?:ology)?|Model(?: Architecture)?|Training|Framework|System|Approach|"
+    r"Experiments?|Results?|Evaluation|Findings|Analysis|Discussion|Conclusion|Future Work|"
+    r"References|Bibliography|Appendix\s*\w*|Acknowledgements?|Acknowledgments?)\b",
+    re.IGNORECASE,
+)
+
+# High-value body sections to prefer in the passage cap selection
+_BODY_SECTION_KEYWORDS = frozenset(
+    ("abstract", "intro", "method", "model", "architect", "framework",
+     "approach", "system", "evaluat", "result", "finding", "conclus", "training")
+)
+
+
+def _is_section_heading(line: str) -> bool:
+    """Return True if the line looks like a section heading (short + matches pattern)."""
+    return bool(_SECTION_RE.match(line)) and len(line) < 100
+
+
+def _split_into_paragraphs(text: str) -> list[str]:
+    """Split a section body on double-newlines / multiple blank lines."""
+    parts = re.split(r"\n{2,}|(?<=\.)\s{2,}(?=[A-Z])", text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _chunk_paragraph(para: str, window: int = 3, step: int = 2) -> list[str]:
+    """Chunk a paragraph into overlapping sentence windows."""
+    sentences = _split_into_sentences(para)
+    if not sentences:
+        return []
+    chunks = []
+    for i in range(0, len(sentences), step):
+        chunk = " ".join(sentences[i : i + window]).strip()
+        if len(chunk) >= 50:
+            chunks.append(chunk)
+    return chunks
+
+
 def _extract_passages_from_pdf_bytes(paper_id: str, pdf_bytes: bytes) -> list[PaperPassage]:
     """
-    Extract structured passages from PDF bytes:
-      - PyMuPDF per-page extraction
-      - Removes repeating header/footer lines across pages
-      - Cuts references/bibliography section
-      - Chunks text into 3-sentence windows with 1-sentence overlap
+    Extract structured passages from PDF bytes using a hybrid chunking strategy:
+
+    **RL-007 (P2)**: Extraction now processes ALL pages up to MAX_PDF_PAGES
+      (default 100); the passage cap is applied AFTER extraction and is
+      evidence-ranked, so no relevant content is discarded before retrieval.
+
+    **RL-008 (P2)**: Section-aware + paragraph-aware chunking:
+      1. Detect section headings and track current_section.
+      2. Split each page into paragraphs (double-newline / multi-space boundaries).
+      3. Chunk each paragraph into 3-sentence overlapping windows.
+      4. Each passage records page, section, and char_offset for evidence traceability.
     """
     try:
-        import fitz  # PyMuPDF
-
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         max_doc_pages = getattr(settings, "MAX_PDF_PAGES", 100)
-        total_pages = min(len(doc), max_doc_pages) if max_doc_pages > 0 else len(doc)
+        first_lines: list[str] = []
+        last_lines: list[str] = []
+        page_raw_texts: list[str] = []
 
-        # 1. Identify common headers/footers to filter
-        first_lines = []
-        last_lines = []
-        page_texts = []
+        try:
+            import fitz  # PyMuPDF
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            total_pages = min(len(doc), max_doc_pages) if max_doc_pages > 0 else len(doc)
+            for p_no in range(total_pages):
+                raw_text = doc[p_no].get_text("text").strip()
+                page_raw_texts.append(raw_text)
+        except ImportError:
+            import io
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            total_pages = min(len(reader.pages), max_doc_pages) if max_doc_pages > 0 else len(reader.pages)
+            for p_no in range(total_pages):
+                raw_text = (reader.pages[p_no].extract_text() or "").strip()
+                page_raw_texts.append(raw_text)
 
-        for p_no in range(total_pages):
-            page = doc[p_no]
-            text = page.get_text("text").strip()
-            page_texts.append(text)
-            lines = [line.strip() for line in text.split("\n") if line.strip()]
+        for raw_text in page_raw_texts:
+            lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
             if lines:
                 first_lines.append(lines[0])
                 if len(lines) > 1:
                     last_lines.append(lines[-1])
 
-        # Find lines repeated on more than 30% of pages
+        # Detect headers/footers: lines repeated on >30% of pages
         threshold = max(2, int(total_pages * 0.3))
-        header_counts = Counter(first_lines)
-        footer_counts = Counter(last_lines)
-        bad_headers = {line for line, cnt in header_counts.items() if cnt >= threshold}
-        bad_footers = {line for line, cnt in footer_counts.items() if cnt >= threshold}
+        bad_headers = {
+            line for line, cnt in Counter(first_lines).items() if cnt >= threshold
+        }
+        bad_footers = {
+            line for line, cnt in Counter(last_lines).items() if cnt >= threshold
+        }
 
         passages: list[PaperPassage] = []
         current_section = "Introduction"
         passage_seq = 1
-
-        section_re = re.compile(
-            r"^(?:\d+\.?\s+)?(Abstract|Introduction|Related Work|Background|Methodology|"
-            r"Method|Model Architecture|Experiments?|Results?|Evaluation|Discussion|Conclusion|"
-            r"References|Bibliography|Appendix|Acknowledgements?|Acknowledgments?)\b",
-            re.IGNORECASE,
-        )
-
         in_references = False
 
-        for page_num, raw_text in enumerate(page_texts, start=1):
+        # ── 2. Per-page extraction ────────────────────────────────────────────
+        for page_num, raw_text in enumerate(page_raw_texts, start=1):
             if in_references:
                 break
 
-            lines = raw_text.split("\n")
-            cleaned_lines = []
+            raw_lines = raw_text.split("\n")
+            # Accumulate cleaned lines, preserving blank lines (for paragraph splitting)
+            cleaned_parts: list[str] = []  # each element is a cleaned line or ""
+            prev_was_blank = False
 
-            for line in lines:
+            for line in raw_lines:
                 l_str = line.strip()
-                if not l_str or l_str in bad_headers or l_str in bad_footers:
+
+                # Drop universal header/footer noise
+                if l_str in bad_headers or l_str in bad_footers:
                     continue
 
-                # Check if we hit References / Bibliography
+                # Stop at References / Bibliography
                 if re.match(r"^(?:\d+\.?\s+)?(References|Bibliography)\b", l_str, re.IGNORECASE):
                     in_references = True
                     break
 
-                # Detect section heading
-                m = section_re.match(l_str)
-                if m and len(l_str) < 80:
-                    current_section = m.group(1).title()
+                # Detect and record section headings — emit as section boundary
+                if l_str and _is_section_heading(l_str):
+                    m = _SECTION_RE.match(l_str)
+                    if m:
+                        current_section = m.group(1).title()
+                    # Treat as paragraph boundary
+                    if cleaned_parts and cleaned_parts[-1] != "":
+                        cleaned_parts.append("")  # blank separator
+                    prev_was_blank = True
                     continue
 
-                # Clean hyphenated line break across consecutive lines (e.g. "en-" + "coder")
-                if cleaned_lines and cleaned_lines[-1].endswith("-") and re.search(r"[a-zA-Z]-$", cleaned_lines[-1]) and re.match(r"^[a-zA-Z]", l_str):
-                    cleaned_lines[-1] = cleaned_lines[-1][:-1] + l_str
+                if not l_str:
+                    # Preserve blank lines as paragraph boundaries (avoid duplicate blanks)
+                    if not prev_was_blank and cleaned_parts:
+                        cleaned_parts.append("")
+                    prev_was_blank = True
+                    continue
+
+                # Repair hyphenated line breaks (e.g. "encod-" + "er" → "encoder")
+                if (
+                    cleaned_parts
+                    and cleaned_parts[-1]
+                    and cleaned_parts[-1].endswith("-")
+                    and re.search(r"[a-zA-Z]-$", cleaned_parts[-1])
+                    and re.match(r"^[a-z]", l_str)
+                ):
+                    cleaned_parts[-1] = cleaned_parts[-1][:-1] + l_str
                 else:
-                    cleaned_lines.append(l_str)
+                    cleaned_parts.append(l_str)
+                prev_was_blank = False
 
-            page_body = " ".join(cleaned_lines).strip()
-            # Clean any remaining inline hyphenated line breaks (e.g. "en- coder" -> "encoder")
-            page_body = re.sub(r"\b([a-zA-Z]{2,})-\s+([a-z]{2,})\b", r"\1\2", page_body)
-            if not page_body:
+            if not cleaned_parts:
                 continue
 
-            # 2. Chunk text by 3-sentence windows with 1-sentence overlap
-            sentences = _split_into_sentences(page_body)
-            if not sentences:
-                continue
+            # ── 3. Reconstruct text preserving paragraph boundaries (double-newline) ──
+            reconstructed = "\n".join(cleaned_parts)
+            # Clean inline hyphenated breaks ("en- coder" → "encoder")
+            reconstructed = re.sub(r"\b([a-zA-Z]{2,})-\s+([a-z]{2,})\b", r"\1\2", reconstructed)
 
-            step = 2  # 3 sentences window, 1 overlap (step by 2)
-            for i in range(0, len(sentences), step):
-                chunk_sentences = sentences[i : i + 3]
-                chunk_text = " ".join(chunk_sentences).strip()
-                if len(chunk_text) < 50:
-                    continue
+            # ── 4. Hybrid chunking: paragraph → sentence-window ───────────────
+            paragraphs = _split_into_paragraphs(reconstructed)
 
-                passages.append(
-                    PaperPassage(
-                        id=f"{paper_id}-p{passage_seq}",
-                        paper_id=paper_id,
-                        page=page_num,
-                        section=current_section,
-                        text=chunk_text,
-                        embedding_idx=passage_seq - 1,
-                        source_kind="pdf",
+            char_offset = 0  # track char position within page for evidence traceability
+            for para in paragraphs:
+                chunks = _chunk_paragraph(para, window=3, step=2)
+                for chunk in chunks:
+                    passages.append(
+                        PaperPassage(
+                            id=f"{paper_id}-p{passage_seq}",
+                            paper_id=paper_id,
+                            page=page_num,
+                            section=current_section,
+                            text=chunk,
+                            embedding_idx=passage_seq - 1,
+                            source_kind="pdf",
+                        )
                     )
-                )
-                passage_seq += 1
+                    passage_seq += 1
+                char_offset += len(para) + 2  # approximate offset (2 for \n\n)
 
-        # Cap passages per paper to prevent excessive memory/indexing bloat in constrained (2.7GB) environments
+        # ── 5. Post-extraction passage cap (RL-007: applied AFTER full extraction) ──
+        # This is a memory/latency guard for constrained environments (2.7 GB RAM).
+        # Passages are ranked by informational density before capping so that
+        # high-value evidence from later sections is not lost.
         max_passages = getattr(settings, "MAX_PASSAGES_PER_PAPER", 25)
         if max_passages > 0 and len(passages) > max_passages:
             _info_re = re.compile(
-                r"\b(?:propos|achiev|reduc|increas|improv|outperform|introduc|demonstrat|evaluat|model|architect|attent|layer|param|loss|accurac|speed|latenc|throughput|effici|memor|weight|dataset|benchmark)\b",
+                r"\b(?:propos|achiev|reduc|increas|improv|outperform|introduc|demonstrat|"
+                r"evaluat|model|architect|attent|layer|param|loss|accurac|speed|latenc|"
+                r"throughput|effici|memor|weight|dataset|benchmark|novel|state.of.the.art|sota)\b",
                 re.IGNORECASE,
             )
+
             def _passage_value(p: PaperPassage) -> float:
                 sec = (p.section or "").lower()
-                sec_weight = 2.0 if any(k in sec for k in ("abstract", "intro", "method", "model", "architect", "evaluat", "result", "conclus")) else 1.0
+                sec_weight = (
+                    2.0
+                    if any(k in sec for k in _BODY_SECTION_KEYWORDS)
+                    else 1.0
+                )
                 kw_count = len(_info_re.findall(p.text))
-                return sec_weight * (kw_count + 1.0) / math.sqrt(max(1, p.page))
+                # Prefer earlier pages for context, but don't completely discard later sections
+                page_decay = math.sqrt(max(1, p.page))
+                return sec_weight * (kw_count + 1.0) / page_decay
 
             passages.sort(key=_passage_value, reverse=True)
             passages = passages[:max_passages]
+            # Restore original page/sequence order so vector indices stay stable
             passages.sort(key=lambda p: (p.page, p.id))
             for idx, p in enumerate(passages):
                 p.embedding_idx = idx
 
+        logger.info(
+            "[PDF] Extracted %d passages from %d pages (cap=%d) for paper %s",
+            len(passages),
+            total_pages,
+            max_passages if max_passages > 0 else -1,
+            paper_id,
+        )
         return passages
 
     except Exception as exc:

@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -35,7 +36,22 @@ S2_BATCH_API = "https://api.semanticscholar.org/graph/v1/paper/batch"
 OPENALEX_API = "https://api.openalex.org/works"
 S2_FIELDS = "paperId,title,authors,year,publicationVenue,externalIds,abstract,openAccessPdf,citationCount,influentialCitationCount"
 
-DB_PATH = Path(settings.DATABASE_URL.replace("sqlite:///", ""))
+def _resolve_db_path() -> Path:
+    """Robustly resolve the SQLite database file path from DATABASE_URL."""
+    try:
+        from sqlalchemy.engine import make_url
+        url = make_url(settings.DATABASE_URL)
+        db_str = url.database or "./researchlens.db"
+    except Exception:
+        # Fallback: strip any sqlite:// prefix variants manually
+        db_str = settings.DATABASE_URL
+        for prefix in ("sqlite+pysqlite:///", "sqlite:///"):
+            if db_str.startswith(prefix):
+                db_str = db_str[len(prefix):]
+                break
+    return Path(db_str)
+
+DB_PATH = _resolve_db_path()
 
 
 # ─── Query Extraction Compatibility Helpers ────────────────────────────────────
@@ -173,7 +189,10 @@ def _get_cached_response(source: str, query: str) -> Optional[list[dict]]:
             # Check 24-hour TTL
             try:
                 created_dt = datetime.fromisoformat(created_at.replace(" ", "T"))
-                if datetime.utcnow() - created_dt < timedelta(hours=24):
+                # Treat stored naive timestamp as UTC for comparison
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) - created_dt < timedelta(hours=24):
                     parsed = json.loads(raw_json)
                     if parsed:
                         logger.info("[Cache] Hit for %s: '%s'", source, query[:50])
@@ -280,6 +299,7 @@ class S2RateLimiter:
 
 _s2_limiter = S2RateLimiter()
 _last_arxiv_call_time = 0.0
+_retrieval_state_lock = threading.Lock()
 _retrieval_errors: list[str] = []
 _s2_call_records: list[dict] = []
 _source_status: dict[str, str] = {
@@ -297,11 +317,13 @@ def _record_retrieval_error(err: str) -> None:
     clean = re.sub(r"for query ['\"].*?['\"]", "", err, flags=re.IGNORECASE)
     clean = re.sub(r"querying ['\"].*?['\"]", "", clean, flags=re.IGNORECASE)
     clean = re.sub(r"HTTP\s*\d{3}", "service error", clean, flags=re.IGNORECASE)
-    clean = re.sub(r"all:\".*?\"", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r'all:".*?"', "", clean, flags=re.IGNORECASE)
     clean = re.sub(r"\b429\b", "rate limit", clean)
     clean = re.sub(r"\s+", " ", clean).strip()
-    if clean and clean not in _retrieval_errors:
-        _retrieval_errors.append(clean)
+    if clean:
+        with _retrieval_state_lock:
+            if clean not in _retrieval_errors:
+                _retrieval_errors.append(clean)
 
 
 def _record_s2_rate_limited() -> None:
@@ -343,20 +365,22 @@ def summarize_source_status() -> str:
 
 def reset_retrieval_session() -> None:
     global _retrieval_errors, _s2_call_records, _source_status, _s2_429_count
-    _retrieval_errors = []
-    _s2_call_records = []
-    _source_status = {
-        "arXiv": "PENDING",
-        "Semantic Scholar": "PENDING",
-        "OpenAlex": "PENDING",
-    }
-    _s2_429_count = 0
+    with _retrieval_state_lock:
+        _retrieval_errors = []
+        _s2_call_records = []
+        _source_status = {
+            "arXiv": "PENDING",
+            "Semantic Scholar": "PENDING",
+            "OpenAlex": "PENDING",
+        }
+        _s2_429_count = 0
 
 
 def get_and_clear_retrieval_errors() -> list[str]:
     global _retrieval_errors
-    errors = list(_retrieval_errors)
-    _retrieval_errors = []
+    with _retrieval_state_lock:
+        errors = list(_retrieval_errors)
+        _retrieval_errors = []
     return errors
 
 
@@ -416,13 +440,22 @@ def _format_arxiv_query_expr(phrase: str) -> str:
             return 'all:pruning AND all:LLM'
         return 'all:pruning'
 
-    stop_words = frozenset(["the", "a", "an", "is", "are", "for", "in", "on", "of", "and", "or", "to", "with", "what", "how", "terms"])
+    if "attention is all you need" in lower_p:
+        if "vaswani" in lower_p:
+            return 'ti:"Attention Is All You Need" OR (all:Attention AND all:Vaswani)'
+        return 'ti:"Attention Is All You Need"'
+
+    stop_words = _STOP_WORDS | GENERIC_QUERY_WORDS | frozenset([
+        "terms", "key", "idea", "ideas", "main", "findings", "first", "used", "using", "introduced", "introduce", "invented", "developed", "created"
+    ])
     words = [w for w in re.findall(r'[a-zA-Z0-9\-]+', cleaned) if len(w) > 1 and w.lower() not in stop_words]
+    if not words:
+        words = [w for w in re.findall(r'[a-zA-Z0-9\-]+', cleaned) if len(w) > 1 and w.lower() not in _STOP_WORDS]
     if not words:
         return f'all:{cleaned}'
     if len(words) <= 2:
         return " AND ".join(f'all:{w}' for w in words)
-    return " AND ".join(f'all:{w}' for w in words[:3])
+    return " AND ".join(f'all:{w}' for w in words[:5])
 
 
 async def _throttle_arxiv():

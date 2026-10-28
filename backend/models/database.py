@@ -6,7 +6,7 @@ Database: SQLite (default) | PostgreSQL (production)
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import (
@@ -69,8 +69,9 @@ class ResearchJob(Base):
     pipeline_json = Column(Text, default="[]")       # JSON pipeline steps
     report_json = Column(Text, nullable=True)        # full JSON report when done
     error_message = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    uncited_sentences = Column(Integer, default=0)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     def get_sources(self) -> list[str]:
         return json.loads(self.sources)
@@ -119,7 +120,7 @@ class PaperRecord(Base):
     passages_json = Column(Text, nullable=True)     # JSON list of PaperPassage
     claims_supported_count = Column(Integer, default=0)
     evidence_count = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     def get_authors(self) -> list[str]:
         if not self.authors_json:

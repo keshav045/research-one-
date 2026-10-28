@@ -78,8 +78,7 @@ def build_pdf_report(inv: ResearchInvestigation, validate: bool = True) -> bytes
     try:
         import fitz
     except ImportError:
-        logger.error("PyMuPDF (fitz) is not installed; cannot generate PDF.")
-        return b""
+        return _build_pdf_report_fallback(inv, validate=validate)
 
     if validate and inv.report:
         from .report_validator import validate_report
@@ -271,3 +270,66 @@ def build_pdf_report(inv: ResearchInvestigation, validate: bool = True) -> bytes
         p.insert_text((margin, page_h - 20), footer_text, fontsize=7.5, fontname="helv", color=(0.55, 0.60, 0.68))
 
     return doc.tobytes()
+
+
+def _build_pdf_report_fallback(inv: ResearchInvestigation, validate: bool = True) -> bytes:
+    """Fallback PDF generator when PyMuPDF (fitz) is unavailable, emitting single-draw PDF content streams."""
+    if validate and inv.report:
+        from .report_validator import validate_report
+        val_errors = validate_report(inv.report)
+        if val_errors:
+            logger.error("[PDF] Report validation failed; refusing to generate PDF: %s", val_errors)
+            return b""
+
+    lines_to_draw: list[tuple[float, str]] = [
+        (13.0, "ResearchLens - Autonomous Academic Synthesis"),
+        (9.0, _pdf_safe(f"Research Question: {inv.question[:85]}")),
+    ]
+    if inv.report:
+        rep = inv.report
+        if rep.executiveSummary:
+            lines_to_draw.append((12.0, "Executive Summary"))
+            for part in _pdf_safe(rep.executiveSummary).split(". "):
+                if part.strip():
+                    lines_to_draw.append((9.0, part.strip()))
+        if rep.findings:
+            lines_to_draw.append((12.0, "Detailed Research Findings"))
+            for sec in rep.findings:
+                lines_to_draw.append((10.5, _pdf_safe(sec.sectionTitle)))
+                for para in sec.paragraphs:
+                    lines_to_draw.append((9.0, _pdf_safe(para.text[:110])))
+        if rep.conclusion:
+            lines_to_draw.append((12.0, "Conclusion"))
+            lines_to_draw.append((9.0, _pdf_safe(rep.conclusion[:110])))
+
+    stream_cmds = ["BT"]
+    y = 780.0
+    for fsize, text_line in lines_to_draw:
+        hex_str = _pdf_safe(text_line).encode("latin-1", "ignore").hex()
+        stream_cmds.append(f"1 0 0 1 50 {y:.1f} Tm /F0 {fsize:.1f} Tf [<{hex_str}>]TJ")
+        y -= (fsize + 6.0)
+        if y < 60.0:
+            break
+    stream_cmds.append("ET")
+    stream_bytes = "\n".join(stream_cmds).encode("latin-1")
+
+    objs: list[bytes] = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595.3 841.9] /Contents 4 0 R /Resources << /Font << /F0 5 0 R >> >> >>\nendobj\n",
+        f"4 0 obj\n<< /Length {len(stream_bytes)} >>\nstream\n".encode("latin-1") + stream_bytes + b"\nendstream\nendobj\n",
+        b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for obj in objs:
+        offsets.append(len(out))
+        out.extend(obj)
+    xref_pos = len(out)
+    out.extend(f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode("latin-1"))
+    for off in offsets:
+        out.extend(f"{off:010d} 00000 n \n".encode("latin-1"))
+    out.extend(
+        f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode("latin-1")
+    )
+    return bytes(out)

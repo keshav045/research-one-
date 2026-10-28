@@ -5,7 +5,26 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel as _PydanticBaseModel, Field
+
+
+class BaseModel(_PydanticBaseModel):
+    """Pydantic v1/v2 compatibility base model."""
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+            return
+        try:
+            super().__setattr__(name, value)
+        except ValueError:
+            object.__setattr__(self, name, value)
+    if not hasattr(_PydanticBaseModel, "model_dump"):
+        def model_dump(self, *args, **kwargs):
+            return self.dict(*args, **kwargs)
+
+    if not hasattr(_PydanticBaseModel, "model_copy"):
+        def model_copy(self, *args, **kwargs):
+            return self.copy(*args, **kwargs)
 
 
 # ─── Enumerations ─────────────────────────────────────────────────────────────
@@ -136,6 +155,7 @@ class Paper(BaseModel):
     fullText: Optional[str] = None
     is_anchor: bool = False
     is_abstract_only: bool = False
+    is_background: bool = False  # True for backfill papers below the relevance threshold
     internal_id: Optional[str] = None
     source_id: Optional[str] = None
     arxiv_id: Optional[str] = None

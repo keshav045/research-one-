@@ -1,1 +1,1 @@
-﻿# ResearchLens Backend Package
+# ResearchLens Backend Package
