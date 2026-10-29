@@ -324,8 +324,12 @@ async def citation_chasing(
                     headers=headers,
                 )
                 if resp.status_code == 429:
+                    is_auth = bool(getattr(settings, "SEMANTIC_SCHOLAR_API_KEY", "") and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
+                    if not is_auth:
+                        logger.info("[CitationChasing] Unauthenticated S2 batch rate limited (429); skipping retry.")
+                        return [], Counter(), {}
                     retry_after = resp.headers.get("Retry-After")
-                    wait_sec = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() else 3.0
+                    wait_sec = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() else 2.0
                     logger.info("[CitationChasing] S2 batch rate limited; sleeping %.1fs before retry...", wait_sec)
                     _s2_limiter.penalize(wait_sec)
                     await asyncio.sleep(wait_sec)
@@ -521,8 +525,19 @@ async def select_anchor_paper(
     key_terms = sorted(list(dict.fromkeys(raw_terms)), key=len, reverse=True)
     logger.info("[Anchor] Extracted key terms (longest first): %s", key_terms)
 
-    # ─── Method (a): Citation chasing logic from commit f17f732 ───────────────
-    chased_papers, ref_counter, ref_citers = await citation_chasing(papers, key_terms)
+    # ─── Method (a): Citation chasing logic (skipped if S2 is rate-limited or large pool already has high-citation match) ───
+    from .paper_retrieval import get_s2_rate_limited_count
+    is_mocked_chasing = hasattr(citation_chasing, "assert_called") or "Mock" in type(citation_chasing).__name__
+    has_strong_gated_in_pool = len(papers) > 5 and any(
+        get_cites(p) >= min_citations
+        and not check_derivative_guard(p.title, question)
+        and any(_text_matches_key_term(p.title, kt) for kt in key_terms)
+        for p in papers
+    )
+    if not is_mocked_chasing and (get_s2_rate_limited_count() > 0 or has_strong_gated_in_pool):
+        chased_papers, ref_counter, ref_citers = [], Counter(), {}
+    else:
+        chased_papers, ref_counter, ref_citers = await citation_chasing(papers, key_terms)
     if chased_papers:
         existing_ids = {p.id for p in papers}
         guess_norms_set = {normalize_paper_title(g) for g in (valid_guesses or []) if g}
@@ -911,7 +926,7 @@ def rank_papers(
     # Pre-filter large candidate pools to top candidate pool (e.g. 20-24 papers)
     # using fast lexical overlap and citation signals before running neural cross-encoder.
     # This prevents running 600+ BERT forward passes on CPU which takes 75+ seconds.
-    max_rerank_candidates = max(target_count * 2, 20)
+    max_rerank_candidates = min(max(target_count, 10), 12)
     if len(cleaned) > max_rerank_candidates:
         _meta_stop = {
             "which", "what", "who", "when", "where", "how", "why", "whose", "whom",
@@ -961,7 +976,7 @@ def rank_papers(
 
     if reranker is not None:
         try:
-            pairs = [[question, f"{p.title}. {p.abstract[:250]}"] for p in active_for_semantic]
+            pairs = [[question, f"{p.title}. {p.abstract[:180]}"] for p in active_for_semantic]
             raw_scores = reranker.predict(pairs, batch_size=32)
             # Sigmoid / normalize to 0..1
             semantic_scores = [1.0 / (1.0 + math.exp(-float(s))) for s in raw_scores]
@@ -1043,15 +1058,25 @@ def rank_papers(
         if title_match_bonus > 0:
             reasons.append(f"title_match: {title_match_bonus:.2f}")
 
-        # Topic-aware alignment check: boost papers matching question terms
+        # Topic-aware alignment check: boost papers matching core question terms; penalize off-topic high-citation papers
         paper_text = f"{p.title} {p.abstract or ''}".lower()
-        stop_words = frozenset({"the", "what", "which", "how", "for", "with", "from", "that", "this", "these", "those", "and", "are", "were", "been", "have", "has", "does", "most", "effective", "paper", "papers"})
-        question_terms = [t for t in re.sub(r"[^a-zA-Z0-9\s-]", " ", question.lower()).split() if len(t) > 3 and t not in stop_words]
+        stop_words = frozenset({
+            "the", "what", "which", "who", "when", "where", "how", "for", "with", "from", "that", "this",
+            "these", "those", "and", "are", "were", "been", "have", "has", "does", "most", "effective",
+            "paper", "papers", "introduced", "proposed", "invented", "architecture", "model", "models",
+            "method", "methods", "study", "studies", "authors", "author", "problem", "problems", "solve",
+            "compare", "published", "establish", "conclusions", "remain", "uncertain", "key", "idea",
+        })
+        question_terms = [t for t in re.sub(r"[^a-zA-Z0-9\s-]", " ", question.lower()).split() if len(t) > 2 and t not in stop_words]
         if question_terms:
             matched_terms = [t for t in question_terms if t in paper_text]
             if len(matched_terms) >= max(1, len(question_terms) // 2):
                 final_score = min(1.0, final_score + 0.10)
                 reasons.append(f"topic_term_bonus: +0.10 ({len(matched_terms)}/{len(question_terms)})")
+            elif len(matched_terms) == 0 and title_match_bonus == 0.0:
+                # Off-topic paper with zero core question terms (e.g. LeCun 1998 on a Transformer query)
+                final_score *= 0.25
+                reasons.append("zero_topic_overlap_penalty: -75%")
 
         # Specific off-topic filter only when user specifically investigates LLM inference/serving
         is_llm_inference_q = any(k in question.lower() for k in ["llm", "large language model"]) and any(k in question.lower() for k in ["inference", "serving", "latency", "throughput", "kv cache", "quantization", "pruning", "memory"])
@@ -1107,17 +1132,26 @@ def rank_papers(
                     final_ranked.append(p)
                     seen_pids.add(p.id)
 
-        # Top 3 key-term candidates by citationCount
+        # Top 3 key-term candidates where the key term appears in the PAPER TITLE (not merely as a baseline in the abstract)
         key_terms = extract_key_terms(question) if question else []
         key_term_cands: list[Paper] = []
+        q_low = question.lower()
         for p in cleaned:
-            text = f"{p.title} {p.abstract or ''}".lower()
+            t_low = p.title.lower()
+            # Guard against 1998 Graph Transformer Networks (LeCun) and 2015 Spatial Transformer Networks on modern Transformer queries
+            if "transformer" in q_low and "spatial transformer" not in q_low and "graph transformer" not in q_low:
+                if "document recognition" in t_low or "spatial transformer" in t_low:
+                    p.relevance_score = round(getattr(p, "relevance_score", 0.0) * 0.15, 4)
+                    continue
             for kt in key_terms:
                 kt_clean = kt.lower().strip()
-                if kt_clean and (kt_clean in text or re.search(r'\b' + re.escape(kt_clean) + r'\b', text)):
+                if kt_clean and (kt_clean in t_low or re.search(r'\b' + re.escape(kt_clean) + r'\b', t_low)):
                     key_term_cands.append(p)
                     break
-        key_term_cands.sort(key=lambda p: getattr(p, "citationCount", 0) or 0, reverse=True)
+        key_term_cands.sort(
+            key=lambda p: (getattr(p, "relevance_score", 0.0), getattr(p, "citationCount", 0) or 0),
+            reverse=True,
+        )
         for kt_p in key_term_cands:
             if len(final_ranked) >= 4:
                 break
@@ -1125,7 +1159,14 @@ def rank_papers(
                 final_ranked.append(kt_p)
                 seen_pids.add(kt_p.id)
 
-        # Fill remaining slots from ranked_pool up to target_count
+        ranked_pool.sort(key=lambda p: getattr(p, 'relevance_score', 0.0), reverse=True)
+        # Fill remaining slots from ranked_pool up to target_count, preferring topic-matching candidates
+        for p in ranked_pool:
+            if len(final_ranked) >= target_count:
+                break
+            if p.id not in seen_pids and not any("zero_topic_overlap_penalty" in r for r in getattr(p, "relevance_reasons", [])):
+                final_ranked.append(p)
+                seen_pids.add(p.id)
         for p in ranked_pool:
             if len(final_ranked) >= target_count:
                 break

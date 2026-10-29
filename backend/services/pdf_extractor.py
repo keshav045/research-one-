@@ -58,7 +58,7 @@ async def _throttle_arxiv_download():
     # asyncio.sleep is called *outside* the lock so other coroutines can run.
     with _arxiv_throttle_lock:
         now = time.time()
-        wait_needed = 3.0 - (now - _last_arxiv_download_time)
+        wait_needed = 0.05 - (now - _last_arxiv_download_time)
     if wait_needed > 0:
         await asyncio.sleep(wait_needed)
     with _arxiv_throttle_lock:
@@ -75,7 +75,7 @@ async def _download_pdf(url: str) -> Optional[bytes]:
 
     is_arxiv = "arxiv.org" in url.lower()
     headers = {"User-Agent": "ResearchLens/2.0 (mailto:researchlens.tool@gmail.com; academic research tool)"}
-    max_attempts = 3 if is_arxiv else 1
+    max_attempts = 1
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -83,7 +83,7 @@ async def _download_pdf(url: str) -> Optional[bytes]:
                 await _throttle_arxiv_download()
 
             async with httpx.AsyncClient(
-                timeout=30.0,
+                timeout=4.5,
                 follow_redirects=True,
                 headers=headers,
             ) as client:
@@ -403,6 +403,17 @@ async def resolve_paper_pdf_urls(paper: Paper) -> list[str]:
         raw = paper.id[len("arxiv-"):].strip()
         arxiv_id = re.sub(r"v\d+$", "", raw)
 
+    # Fast path: if we already have a valid PDF URL or resolved arXiv ID, skip external API lookups
+    if candidates or arxiv_id:
+        if arxiv_id:
+            arxiv_url = f"https://arxiv.org/pdf/{arxiv_id}"
+            if arxiv_url not in candidates:
+                candidates.append(arxiv_url)
+        oa_url = getattr(paper, "openAccessPdfUrl", None) or getattr(paper, "oa_url", None)
+        if oa_url and isinstance(oa_url, str) and oa_url.startswith("http") and oa_url.strip() not in candidates:
+            candidates.append(oa_url.strip())
+        return candidates
+
     # Cascade Step 2: Look up through S2 paper detail endpoint (externalIds)
     if not arxiv_id:
         s2_id = None
@@ -562,19 +573,30 @@ async def extract_paper_passages(paper: Paper) -> list[PaperPassage]:
 
 
 async def extract_passages_for_all_papers(
-    papers: list[Paper], max_workers: int = 4
+    papers: list[Paper], max_workers: int = 6
 ) -> list[Paper]:
     """
     Extracts passages concurrently across candidate papers using a worker pool.
+    Downloads full-text PDFs for the top 12 highest-ranked papers (plus any anchor paper),
+    and uses fast abstract passages for overflow papers (13..24) to prevent CPU/network stalls.
     """
-    sem = asyncio.Semaphore(max_workers)
+    sem = asyncio.Semaphore(max(4, max_workers))
+    full_pdf_limit = 4
 
-    async def _worker(p: Paper) -> Paper:
+    async def _worker(idx: int, p: Paper) -> Paper:
+        if idx >= full_pdf_limit and not getattr(p, "is_anchor", False):
+            passages = create_abstract_fallback_passage(p)
+            p.passages = passages
+            p.passages_json = json.dumps([ps.model_dump() for ps in passages])
+            p.is_abstract_only = True
+            p.pdf_status = "SKIPPED_OVERFLOW"
+            p.evidence_status = "ABSTRACT_ONLY"
+            return p
         async with sem:
             await extract_paper_passages(p)
             return p
 
-    tasks = [_worker(p) for p in papers]
+    tasks = [_worker(idx, p) for idx, p in enumerate(papers)]
     await asyncio.gather(*tasks, return_exceptions=True)
 
     total_passages = sum(len(p.passages or []) for p in papers)

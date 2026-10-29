@@ -170,14 +170,9 @@ class VectorStore:
             logger.warning("[FAISS] faiss indexing unavailable (%s) - falling back to numpy cosine similarity", exc)
             self._index = None
 
-        try:
-            tokenizer, _ = get_model()
-            tok_counts = [len(tok_ids) for tok_ids in tokenizer(texts, truncation=False, add_special_tokens=False)["input_ids"]]
-            mean_tokens = float(np.mean(tok_counts)) if tok_counts else 0.0
-            p95_tokens = float(np.percentile(tok_counts, 95)) if tok_counts else 0.0
-        except Exception as exc:
-            logger.warning("[VectorStore] Token count calculation failed: %s", exc)
-            mean_tokens, p95_tokens = 0.0, 0.0
+        tok_counts = [int(len(t.split()) * 1.3) for t in texts]
+        mean_tokens = float(np.mean(tok_counts)) if tok_counts else 0.0
+        p95_tokens = float(np.percentile(tok_counts, 95)) if tok_counts else 0.0
 
         logger.info(
             "[VectorStore.build] papers=%d, passages=%d, tokens_per_passage (mean=%.1f, p95=%.1f), "

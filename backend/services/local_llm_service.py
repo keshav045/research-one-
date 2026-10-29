@@ -310,8 +310,11 @@ def _format_first_sentence(
     alternate_paper: Optional[Paper] = None,
 ) -> str:
     """Formulate mandatory first sentence naming source paper (title, authors, year) deterministically in Python."""
+    from .query_planner import classify_question_type
     label, sent = anchor_state(anchor_paper, anchor_confidence)
     if label == "Not identified":
+        if classify_question_type(question) != "factual_lookup":
+            return ""
         return f"Foundational anchor paper: Not identified for '{question}'."
     if label == "Uncertain":
         return sent
@@ -384,7 +387,7 @@ async def generate_plain_answer(
     provider_used = "none"
     model_name = "none"
     try:
-        raw_output, provider_used = await _call_llm(prompt, max_tokens=350)
+        raw_output, provider_used = await asyncio.wait_for(_call_llm(prompt, max_tokens=220), timeout=4.5)
         clean = raw_output.strip().replace("```", "").strip()
         # Verify LLM respected [n] citation markers and did not produce empty response
         if clean and re.search(r"\[\d+\]", clean) and len(clean.split()) >= 15:
@@ -517,11 +520,12 @@ def build_references_from_citations(papers: list[Paper], citations: list[Citatio
 
 
 def build_comparison_table(papers: list[Paper], citations: list[Citation]) -> list[ComparisonRow]:
-    """Constructs comparison rows only from real metadata (title, authors, year, venue, citation count)."""
+    """Constructs comparison rows only from real metadata, prioritizing cited evidence-bearing papers first."""
     rows: list[ComparisonRow] = []
     seen = set()
+    ordered_papers = build_references_from_citations(papers, citations)
 
-    for p in papers[:6]:
+    for p in ordered_papers[:6]:
         if not p.title:
             continue
         title = p.title.strip()
@@ -619,10 +623,10 @@ async def synthesize_report(
         anchor_paper=anchor_paper,
         first_sentence=first_sentence,
     )
-    # If LLM paraphrasing caused all claim sentences to be rejected by strict NLI despite verified citations,
-    # fall back to verbatim verified claims so valid evidence is preserved.
-    has_retained_claim = any(d.get("type") in ("claim", "qualification") for d in verified_details)
-    if not has_retained_claim and citations and writer_provider not in ("deterministic_fallback", "honest_reporting_system"):
+    # If LLM paraphrasing caused sentences to be rejected by strict NLI (integrity < 0.80) despite verified citations,
+    # supplement/fall back to verbatim verified claims so the final report maintains >= 85% verified integrity.
+    retained_claims_count = sum(1 for d in verified_details if d.get("type") in ("claim", "qualification"))
+    if (retained_claims_count == 0 or integrity < 0.80) and citations and writer_provider != "honest_reporting_system":
         fallback_sents = []
         seen_fb = set()
         for c in citations[:6]:
@@ -677,13 +681,24 @@ async def synthesize_report(
                 for c_num in cite_m:
                     if 1 <= c_num <= ref_count:
                         ref_paper = references[c_num - 1]
-                        ref_auths = " ".join(getattr(ref_paper, "authors", []) or []).lower()
-                        if auth.lower() not in ref_auths:
+                        ref_auths_list = getattr(ref_paper, "authors", []) or []
+                        first_auth_lower = ref_auths_list[0].lower() if ref_auths_list else ""
+                        if auth.lower() not in first_auth_lower:
+                            # Prefer a reference where `auth` is the FIRST author (e.g. 'Wei et al.' -> Jason Wei as 1st author)
                             actual_ref_idx = next(
-                                (idx + 1 for idx, p in enumerate(references) if auth.lower() in " ".join(getattr(p, "authors", []) or []).lower()),
-                                None
+                                (
+                                    idx + 1
+                                    for idx, p in enumerate(references)
+                                    if (getattr(p, "authors", None) and auth.lower() in p.authors[0].lower())
+                                ),
+                                None,
                             )
-                            if actual_ref_idx:
+                            if not actual_ref_idx and auth.lower() not in " ".join(ref_auths_list).lower():
+                                actual_ref_idx = next(
+                                    (idx + 1 for idx, p in enumerate(references) if auth.lower() in " ".join(getattr(p, "authors", []) or []).lower()),
+                                    None,
+                                )
+                            if actual_ref_idx and actual_ref_idx != c_num:
                                 sentence = sentence.replace(f"[{c_num}]", f"[{actual_ref_idx}]")
         return sentence
 

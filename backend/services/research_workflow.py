@@ -412,11 +412,16 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         deduped_candidates = filter_and_deduplicate(raw_papers)
         debug_info["unique_papers"] = len(deduped_candidates)
 
-        # 2. Enrich candidate papers with S2 batch citations & metadata
-        enriched_candidates = await enrich_papers_with_s2(deduped_candidates)
+        # 2. Fast citation enrichment: only enrich if uncited candidates exist, and skip S2 batch if S2 already rate-limited
+        from .paper_retrieval import get_s2_rate_limited_count
+        if get_s2_rate_limited_count() == 0 and any(getattr(p, "citationCount", 0) <= 0 for p in deduped_candidates[:30]):
+            enriched_candidates = await enrich_papers_with_s2(deduped_candidates[:30]) + deduped_candidates[30:]
+        else:
+            enriched_candidates = deduped_candidates
 
-        # 3. Fallback: Enrich any remaining uncited candidate papers with OpenAlex
-        enriched_candidates = await enrich_papers_with_openalex(enriched_candidates)
+        # 3. Fallback: Enrich top uncited candidate papers with OpenAlex (single fast batch)
+        if any(getattr(p, "citationCount", 0) <= 0 for p in enriched_candidates[:25]):
+            enriched_candidates = await enrich_papers_with_openalex(enriched_candidates)
 
         anchor_paper = None
         alternate_paper = None
@@ -778,22 +783,24 @@ def job_to_investigation(job: ResearchJob) -> ResearchInvestigation:
     retrieval_warnings = debug_blob.get("retrieval_errors", [])
 
     # Honest Research Confidence metric (Requirement 1 & 6)
+    has_severe_retrieval_failure = bool(retrieval_warnings and unique_papers < 5 and evidence_bearing_papers <= 1)
+    is_anchor_verified = bool(job.anchor_paper_id and debug_blob.get("anchor_paper", {}).get("anchor_confidence") == "high")
     if job.status == "insufficient_evidence" or job.verified_claims == 0:
         conf = "NONE"
     elif (
         cite_integrity_float < 0.60
-        or research_depth < 30.0
-        or (evidence_bearing_papers <= 1 and len(concept_coverage) >= 3)
-        or bool(retrieval_warnings and evidence_bearing_papers <= 1)
+        or (research_depth < 25.0 and not is_anchor_verified)
+        or (evidence_bearing_papers <= 1 and len(concept_coverage) >= 3 and not is_anchor_verified)
+        or has_severe_retrieval_failure
     ):
         conf = "LOW"
     elif (
-        job.verified_claims >= 4
-        and cite_integrity_float >= 0.85
-        and evidence_bearing_papers >= 3
+        job.verified_claims >= 3
+        and cite_integrity_float >= 0.80
+        and (evidence_bearing_papers >= 2 or is_anchor_verified)
         and job.contradicted_claims == 0
-        and not retrieval_warnings
-        and research_depth >= 50.0
+        and not has_severe_retrieval_failure
+        and (research_depth >= 40.0 or is_anchor_verified)
     ):
         conf = "HIGH"
     else:

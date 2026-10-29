@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     # Local LLM Fallback (active when OpenAI / cloud fails)
     LOCAL_LLM_MODEL: str = "Qwen/Qwen2.5-0.5B-Instruct"
     LOCAL_LLM_MAX_TOKENS: int = 1536
-    LLM_FALLBACK_LOCAL: bool = True
+    LLM_FALLBACK_LOCAL: bool = False
     OLLAMA_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen2.5:3b-instruct"
 
@@ -113,6 +113,7 @@ class Settings(BaseSettings):
 
     # Feature Flags
     SEED_PAPERS_ENABLED: bool = True
+    FAST_QUERY_PLANNER: bool = True
     DISABLE_CACHE: bool = False
 
     # Database
@@ -140,8 +141,8 @@ class Settings(BaseSettings):
     TORCH_NUM_THREADS: int = 4
     EMBED_MAX_LENGTH: int = 128
     SKIP_NONBODY_SECTIONS: bool = True
-    MAX_PDF_PAGES: int = 100
-    MAX_PASSAGES_PER_PAPER: int = 25
+    MAX_PDF_PAGES: int = 12
+    MAX_PASSAGES_PER_PAPER: int = 10
     EMBED_CACHE_ENABLED: bool = True
     EMBED_QUANTIZE: bool = False
     EMBEDDING_BACKEND: str = "auto"  # "auto" | "openai" | "local"

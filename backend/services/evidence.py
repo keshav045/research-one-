@@ -243,52 +243,26 @@ def extract_and_verify_evidence(
     candidate_claims: List[Dict] = []
     seen_subq_claim_norms: set[str] = set()
 
-    for sub_q in queries:
-        faiss_candidates = vector_store.search(sub_q, top_k=30)
+    for sub_q in queries[:2]:
+        faiss_candidates = vector_store.search(sub_q, top_k=10)
         chosen_passages: list[tuple[PassageRecord, float]] = []
 
         if anchor_paper_id:
-            # Anchor exists: search anchor passages first
-            anchor_records = [r for r in vector_store.records if r.paper_id == anchor_paper_id]
-            if anchor_records:
-                if reranker is not None:
-                    pairs = [[sub_q, clean_hyphenated_breaks(r.passage.text)] for r in anchor_records]
-                    scores = reranker.predict(pairs)
-                    anchor_scored = [(r, float(s)) for r, s in zip(anchor_records, scores)]
-                else:
-                    anchor_scored = [(r, 0.5) for r in anchor_records]
-                anchor_scored.sort(key=lambda x: x[1], reverse=True)
+            # Fast paper-scoped FAISS search on anchor paper first (avoids running CrossEncoder on every passage)
+            anchor_scored = vector_store.search_paper(anchor_paper_id, sub_q, top_k=5)
+            if not anchor_scored:
+                anchor_records = [r for r in vector_store.records if r.paper_id == anchor_paper_id][:5]
+                anchor_scored = [(r, 0.8) for r in anchor_records]
+            chosen_passages = list(anchor_scored[:5])
 
-                relevant_anchor = [item for item in anchor_scored if item[1] >= -1.5]
-                chosen_passages = list(relevant_anchor[:3] if relevant_anchor else anchor_scored[:2])
-
-                # ALSO add top passages from other papers from FAISS candidates
-                other_candidates = [r for r, _ in faiss_candidates if r.paper_id != anchor_paper_id]
-                if other_candidates:
-                    if reranker is not None:
-                        other_pairs = [[sub_q, clean_hyphenated_breaks(r.passage.text)] for r in other_candidates]
-                        other_scores = reranker.predict(other_pairs)
-                        other_scored = [(r, float(s)) for r, s in zip(other_candidates, other_scores)]
-                    else:
-                        other_scored = [(r, sc) for r, sc in faiss_candidates if r.paper_id != anchor_paper_id]
-                    other_scored.sort(key=lambda x: x[1], reverse=True)
-                    for item in other_scored:
-                        if len(chosen_passages) >= 8:
-                            break
-                        if not any(item[0].passage.id == cp[0].passage.id for cp in chosen_passages):
-                            chosen_passages.append(item)
+            for r, sc in faiss_candidates:
+                if r.paper_id != anchor_paper_id:
+                    if len(chosen_passages) >= 8:
+                        break
+                    if not any(r.passage.id == cp[0].passage.id for cp in chosen_passages):
+                        chosen_passages.append((r, sc))
         else:
-            # No anchor: rank from all papers by cross-encoder relevance
-            cand_records = [r for r, _ in faiss_candidates]
-            if cand_records:
-                if reranker is not None:
-                    pairs = [[sub_q, clean_hyphenated_breaks(r.passage.text)] for r in cand_records]
-                    scores = reranker.predict(pairs)
-                    scored = [(r, float(s)) for r, s in zip(cand_records, scores)]
-                else:
-                    scored = list(faiss_candidates)
-                scored.sort(key=lambda x: x[1], reverse=True)
-                chosen_passages = scored[:8]
+            chosen_passages = list(faiss_candidates[:8])
 
         # Deduplicate identical passages within this sub-question
         seen_p_texts: set[str] = set()
@@ -373,6 +347,9 @@ def extract_and_verify_evidence(
     if not candidate_claims:
         return [], [], [], removal_counts
 
+    # Cap candidate claims to top 20 so CrossEncoder runs in a single sub-0.3s batch
+    candidate_claims = candidate_claims[:20]
+
     # 2. Compute cross-encoder relevance scores for (sub_question, claim)
     # Include paper title context when scoring anchor paper sentences so factual-lookup questions
     # ("Which paper introduced X?") match architectural claims inside the anchor paper.
@@ -385,7 +362,7 @@ def extract_and_verify_evidence(
                 rel_pairs.append([c["sub_q"], f"{rec_p.title}: {c['sentence']}"])
             else:
                 rel_pairs.append([c["sub_q"], c["sentence"]])
-        raw_rel = reranker.predict(rel_pairs)
+        raw_rel = reranker.predict(rel_pairs, batch_size=32)
         rel_scores = [1.0 / (1.0 + math.exp(-float(s))) for s in raw_rel]
     else:
         rel_scores = [0.5 for _ in candidate_claims]

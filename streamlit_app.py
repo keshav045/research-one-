@@ -73,7 +73,7 @@ except Exception as e:
 # - Single-threaded PyTorch to prevent CPU thread thrashing and memory bloat
 os.environ.setdefault("NLI_DEVICE", "cpu")
 os.environ.setdefault("SKIP_MODEL_WARMUP", "true")
-os.environ.setdefault("MAX_PDF_WORKERS", "2")
+os.environ.setdefault("MAX_PDF_WORKERS", "4")
 os.environ.setdefault("NLI_MODEL", "cross-encoder/nli-deberta-v3-small")
 os.environ.setdefault("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 os.environ.setdefault("EMBEDDING_BACKEND", "auto")
@@ -117,7 +117,7 @@ from backend.services.research_workflow import (
 )
 
 # Default depth counts and worker limits follow backend.config.settings
-settings.MAX_PDF_WORKERS = 2
+settings.MAX_PDF_WORKERS = 4
 
 # ── 4. Concurrency Guard & Model Caching ──────────────────────────────────────
 # Guard against concurrent runs: never execute more than one pipeline in memory
@@ -702,7 +702,7 @@ with tab_research:
             start_poll_time = time.time()
 
             while True:
-                time.sleep(0.8)
+                time.sleep(0.25)
 
                 db_poll = SessionLocal()
                 try:

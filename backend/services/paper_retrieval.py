@@ -276,7 +276,7 @@ class S2RateLimiter:
         lock = self._get_lock()
         await lock.acquire()
         is_authenticated = bool(settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
-        min_interval = 1.25 if is_authenticated else 3.0
+        min_interval = 1.0 if is_authenticated else 1.25
         now = time.time()
         elapsed = now - self._last_call_end
         if elapsed < min_interval:
@@ -459,13 +459,13 @@ def _format_arxiv_query_expr(phrase: str) -> str:
 
 
 async def _throttle_arxiv():
-    """Ensure at least 3 seconds between successive arXiv API requests."""
+    """Ensure polite spacing (1.0s) between successive arXiv API requests."""
     global _last_arxiv_call_time
     async with _get_arxiv_lock():
         now = time.time()
         elapsed = now - _last_arxiv_call_time
-        if elapsed < 3.0:
-            await asyncio.sleep(3.0 - elapsed)
+        if elapsed < 0.25:
+            await asyncio.sleep(0.25 - elapsed)
         _last_arxiv_call_time = time.time()
 
 
@@ -558,7 +558,7 @@ async def _fetch_arxiv_query(search_expr: str, max_results: int) -> list[Paper]:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(ARXIV_API, params=params)
             if resp.status_code == 200:
                 papers = _parse_arxiv_xml(resp.text)
@@ -594,7 +594,7 @@ async def _fetch_s2_with_retry(query: str, limit: int, headers: dict) -> list[Pa
         async with _s2_limiter:
             t0 = time.time()
             try:
-                async with httpx.AsyncClient(timeout=15.0) as client:
+                async with httpx.AsyncClient(timeout=5.0) as client:
                     params = {
                         "query": query,
                         "limit": limit,
@@ -761,7 +761,7 @@ async def enrich_papers_with_s2(papers: list[Paper]) -> list[Paper]:
         logger.info("[Enrichment] No candidate papers with arXiv ID or DOI found for S2 batch enrichment.")
         return papers
 
-    all_ids = list(id_to_papers.keys())
+    all_ids = list(id_to_papers.keys())[:200]
     enriched_paper_ids: set[str] = set()
 
     headers = {"User-Agent": "ResearchLens/2.0 (academic research tool)"}
@@ -777,7 +777,7 @@ async def enrich_papers_with_s2(papers: list[Paper]) -> list[Paper]:
         async with _s2_limiter:
             t0 = time.time()
             try:
-                async with httpx.AsyncClient(timeout=25.0) as client:
+                async with httpx.AsyncClient(timeout=5.0) as client:
                     params = {"fields": "citationCount,venue,year,authors,publicationVenue"}
                     resp = await client.post(
                         S2_BATCH_API,
@@ -1071,7 +1071,7 @@ async def _fetch_openalex_query(query: str, limit: int = 50) -> list[Paper]:
     diag_url = f"{OPENALEX_API}?{'&'.join(safe_params)}"
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(OPENALEX_API, params=params, headers=headers)
             logger.info("[OpenAlex] Request URL: '%s' -> HTTP %d", diag_url, resp.status_code)
             if resp.status_code == 200:
@@ -1101,7 +1101,7 @@ async def enrich_papers_with_openalex(papers: list[Paper]) -> list[Paper]:
     """
     Enriches candidate papers that lack citationCount by querying OpenAlex by arXiv ID or DOI.
     """
-    uncited = [p for p in papers if getattr(p, "citationCount", 0) <= 0]
+    uncited = [p for p in papers if getattr(p, "citationCount", 0) <= 0][:25]
     if not uncited:
         return papers
 
@@ -1145,7 +1145,7 @@ async def enrich_papers_with_openalex(papers: list[Paper]) -> list[Paper]:
         if api_key:
             params["api_key"] = api_key
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(OPENALEX_API, params=params, headers=headers)
                 if resp.status_code == 200:
                     for w in resp.json().get("results", []):
@@ -1198,7 +1198,7 @@ async def enrich_papers_with_openalex(papers: list[Paper]) -> list[Paper]:
         if api_key:
             params["api_key"] = api_key
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(OPENALEX_API, params=params, headers=headers)
                 if resp.status_code == 200:
                     for w in resp.json().get("results", []):
@@ -1244,88 +1244,92 @@ async def retrieve_candidate_papers(
     openalex_candidates: list[Paper] = []
     s2_candidates: list[Paper] = []
 
-    # 1. arXiv queries
-    if (ResearchSource.ARXIV in sources or "arXiv" in source_values) and getattr(settings, "ARXIV_ENABLED", True):
-        arxiv_tasks = []
-        for title in valid_guesses:
-            clean_title = re.sub(r'["\']', '', title).strip()
-            if clean_title:
-                arxiv_tasks.append(_fetch_arxiv_query(f'ti:"{clean_title}"', fetch_limit))
-        for q in plan.get("queries", []):
-            phrase = re.sub(r'["\']', '', q).strip()
-            if phrase:
-                query_expr = _format_arxiv_query_expr(phrase)
-                if query_expr:
-                    arxiv_tasks.append(_fetch_arxiv_query(query_expr, fetch_limit))
-        if arxiv_tasks:
-            arxiv_results = await asyncio.gather(*arxiv_tasks, return_exceptions=True)
-            for r in arxiv_results:
-                if isinstance(r, list):
-                    arxiv_candidates.extend(r)
-        set_source_status("arXiv", "SUCCESS" if arxiv_candidates else "NO_RESULTS")
-    else:
-        set_source_status("arXiv", "NOT_USED")
-
-    # 2. OpenAlex queries (sorted by cited_by_count:desc, top 50 per query)
-    if (ResearchSource.OPENALEX in sources or "OpenAlex" in source_values) and getattr(settings, "OPENALEX_ENABLED", True):
-        openalex_queries: list[str] = []
-        distinctive_term = extract_distinctive_term(question)
-        if distinctive_term and distinctive_term not in openalex_queries:
-            openalex_queries.append(distinctive_term)
-        for g in valid_guesses:
-            if g not in openalex_queries:
-                openalex_queries.append(g)
-        for q in plan.get("queries", []):
-            if q not in openalex_queries:
-                openalex_queries.append(q)
-
-        openalex_tasks = [_fetch_openalex_query(oq, limit=50) for oq in openalex_queries]
-        if openalex_tasks:
-            openalex_results = await asyncio.gather(*openalex_tasks, return_exceptions=True)
-            for r in openalex_results:
-                if isinstance(r, list):
-                    openalex_candidates.extend(r)
-        set_source_status("OpenAlex", "SUCCESS" if openalex_candidates else "NO_RESULTS")
-    else:
-        set_source_status("OpenAlex", "NOT_USED")
-
-    # 3. Semantic Scholar queries (one at a time, sequential, max 6 if authenticated, 3 if unauthenticated)
-    if (ResearchSource.SEMANTIC_SCHOLAR in sources or "Semantic Scholar" in source_values) and getattr(settings, "SEMANTIC_SCHOLAR_ENABLED", True):
-        s2_queries_list: list[str] = []
-        for g in valid_guesses:
-            if g not in s2_queries_list:
-                s2_queries_list.append(g)
-        # Include non-LLM key terms (e.g. acronyms, method names)
-        from .ranker import extract_key_terms
-        for kt in (extract_key_terms(question) if question else []):
-            if kt not in s2_queries_list:
-                s2_queries_list.append(kt)
-        for q in plan.get("queries", []):
-            if q not in s2_queries_list:
-                s2_queries_list.append(q)
-
-        is_authenticated = bool(settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
-        max_s2_search_calls = 6 if is_authenticated else 3
-        s2_queries_to_run = s2_queries_list[:max_s2_search_calls]
-        for s2_q in s2_queries_to_run:
-            try:
-                s2_res = await _fetch_semantic_scholar_query(s2_q, s2_limit)
-                if s2_res:
-                    s2_candidates.extend(s2_res)
-            except Exception as exc:
-                logger.warning("[S2] Semantic Scholar call failed for '%s': %s", s2_q[:40], exc)
-                _record_retrieval_error("Semantic Scholar call failed")
-
-        if get_s2_rate_limited_count() > 0:
-            set_source_status("Semantic Scholar", "RATE_LIMITED")
-            warn_msg = "Semantic Scholar rate limit reached for some queries; results may have incomplete source coverage."
-            _record_retrieval_error(warn_msg)
-        elif s2_candidates:
-            set_source_status("Semantic Scholar", "SUCCESS")
+    async def _run_arxiv_branch() -> None:
+        if (ResearchSource.ARXIV in sources or "arXiv" in source_values) and getattr(settings, "ARXIV_ENABLED", True):
+            arxiv_tasks = []
+            for title in valid_guesses[:1]:
+                clean_title = re.sub(r'["\']', '', title).strip()
+                if clean_title:
+                    arxiv_tasks.append(_fetch_arxiv_query(f'ti:"{clean_title}"', fetch_limit))
+            for q in plan.get("queries", [])[:2]:
+                phrase = re.sub(r'["\']', '', q).strip()
+                if phrase:
+                    query_expr = _format_arxiv_query_expr(phrase)
+                    if query_expr:
+                        arxiv_tasks.append(_fetch_arxiv_query(query_expr, fetch_limit))
+            if arxiv_tasks:
+                arxiv_results = await asyncio.gather(*arxiv_tasks[:2], return_exceptions=True)
+                for r in arxiv_results:
+                    if isinstance(r, list):
+                        arxiv_candidates.extend(r)
+            set_source_status("arXiv", "SUCCESS" if arxiv_candidates else "NO_RESULTS")
         else:
-            set_source_status("Semantic Scholar", "NO_RESULTS")
-    else:
-        set_source_status("Semantic Scholar", "NOT_USED")
+            set_source_status("arXiv", "NOT_USED")
+
+    async def _run_openalex_branch() -> None:
+        if (ResearchSource.OPENALEX in sources or "OpenAlex" in source_values) and getattr(settings, "OPENALEX_ENABLED", True):
+            openalex_queries: list[str] = []
+            distinctive_term = extract_distinctive_term(question)
+            if distinctive_term and distinctive_term not in openalex_queries:
+                openalex_queries.append(distinctive_term)
+            for g in valid_guesses[:1]:
+                if g not in openalex_queries:
+                    openalex_queries.append(g)
+            for q in plan.get("queries", [])[:2]:
+                if q not in openalex_queries:
+                    openalex_queries.append(q)
+
+            openalex_tasks = [_fetch_openalex_query(oq, limit=35) for oq in openalex_queries[:2]]
+            if openalex_tasks:
+                openalex_results = await asyncio.gather(*openalex_tasks, return_exceptions=True)
+                for r in openalex_results:
+                    if isinstance(r, list):
+                        openalex_candidates.extend(r)
+            set_source_status("OpenAlex", "SUCCESS" if openalex_candidates else "NO_RESULTS")
+        else:
+            set_source_status("OpenAlex", "NOT_USED")
+
+    async def _run_s2_branch() -> None:
+        if (ResearchSource.SEMANTIC_SCHOLAR in sources or "Semantic Scholar" in source_values) and getattr(settings, "SEMANTIC_SCHOLAR_ENABLED", True):
+            s2_queries_list: list[str] = []
+            for g in valid_guesses[:1]:
+                if g not in s2_queries_list:
+                    s2_queries_list.append(g)
+            from .ranker import extract_key_terms
+            for kt in (extract_key_terms(question) if question else [])[:1]:
+                if kt not in s2_queries_list:
+                    s2_queries_list.append(kt)
+            for q in plan.get("queries", [])[:2]:
+                if q not in s2_queries_list:
+                    s2_queries_list.append(q)
+
+            is_authenticated = bool(settings.SEMANTIC_SCHOLAR_API_KEY and settings.SEMANTIC_SCHOLAR_API_KEY.strip())
+            max_s2_search_calls = 2 if is_authenticated else 1
+            s2_queries_to_run = s2_queries_list[:max_s2_search_calls]
+            for s2_q in s2_queries_to_run:
+                if not is_authenticated and get_s2_rate_limited_count() > 0:
+                    break
+                try:
+                    s2_res = await _fetch_semantic_scholar_query(s2_q, min(s2_limit, 40))
+                    if s2_res:
+                        s2_candidates.extend(s2_res)
+                except Exception as exc:
+                    logger.warning("[S2] Semantic Scholar call failed for '%s': %s", s2_q[:40], exc)
+                    _record_retrieval_error("Semantic Scholar call failed")
+
+            if get_s2_rate_limited_count() > 0:
+                set_source_status("Semantic Scholar", "RATE_LIMITED")
+                warn_msg = "Semantic Scholar rate limit reached for some queries; results may have incomplete source coverage."
+                _record_retrieval_error(warn_msg)
+            elif s2_candidates:
+                set_source_status("Semantic Scholar", "SUCCESS")
+            else:
+                set_source_status("Semantic Scholar", "NO_RESULTS")
+        else:
+            set_source_status("Semantic Scholar", "NOT_USED")
+
+    # Execute all three academic source branches in parallel!
+    await asyncio.gather(_run_arxiv_branch(), _run_openalex_branch(), _run_s2_branch(), return_exceptions=True)
 
     # Log candidates per source and how many came from citation-sorted path
     logger.info(

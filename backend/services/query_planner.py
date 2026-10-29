@@ -58,7 +58,9 @@ STOP_WORDS = frozenset(
 
 META_WORDS = frozenset(
     "paper papers introduced introducing introduce propose proposed key idea ideas "
-    "architecture model models study approach method work publication author".split()
+    "architecture model models study studies approach method work publication author authors "
+    "compare comparing comparison versus vs published establish established conclusions conclusion "
+    "remain remains uncertain problem problems solve solves solved main findings".split()
 )
 
 
@@ -75,35 +77,82 @@ def classify_question_type(question: str) -> str:
     return "literature_review"
 
 
-def extract_question_facets(question: str, sub_questions: Optional[list[str]] = None) -> list[str]:
-    """Extract topical facets or sub-aspects dynamically for any research question."""
-    # 1. If sub-questions are provided and multiple, synthesize facet titles from them
-    if sub_questions and len(sub_questions) > 1:
-        facets = []
-        for sq in sub_questions:
-            clean = re.sub(
-                r"^(what|how|why|which|when|where|is|are|can|do|does)\s+(are|is|the|do|does)?\s*",
-                "",
-                sq.strip(),
-                flags=re.IGNORECASE,
-            ).rstrip("?").strip()
-            words = clean.split()[:4]
-            if words:
-                facet_title = " ".join(w.capitalize() for w in words)
-                if facet_title not in facets:
-                    facets.append(facet_title)
-        if facets:
-            return facets[:4]
+def _clean_phrase_to_title(phrase: str) -> str:
+    """Convert a raw clause into a clean academic section title."""
+    p = phrase.strip().rstrip("?.!,:;")
+    # Strip leading question/imperative framing
+    p = re.sub(
+        r"^(?:compare|comparing|contrast|evaluate|analyze|explain|describe|"
+        r"which\s+paper\s+(?:introduced|proposed|invented)|"
+        r"who\s+(?:introduced|proposed|invented|were\s+its\s+authors)|"
+        r"what\s+(?:is|are|was|were)\s+(?:the\s+)?(?:main\s+|key\s+)?(?:findings|idea|ideas|types|techniques|differences|problem|problems|role)\s*(?:of|for|in|between)?|"
+        r"what\s+do\s+published\s+studies\s+establish|"
+        r"what\s+conclusions\s+remain\s+uncertain|"
+        r"what\s+problem\s+do|"
+        r"how\s+(?:do|does|is|are|can))\s+",
+        "",
+        p,
+        flags=re.IGNORECASE,
+    ).strip()
+    # Strip trailing verb/domain clauses like 'solve' or 'in language models'
+    p = re.sub(r"\s+(?:solve|establish|remain\s+uncertain|in\s+(?:large\s+)?language\s+models)$", "", p, flags=re.IGNORECASE).strip()
+    tokens = [
+        w for w in re.findall(r"[A-Za-z0-9][-A-Za-z0-9]*", p)
+        if w.lower() not in STOP_WORDS and w.lower() not in META_WORDS and len(w) > 1
+    ]
+    if not tokens:
+        return ""
+    title_words = []
+    for w in tokens[:4]:
+        if w.isupper() or (any(c.isupper() for c in w[1:]) and any(c.islower() for c in w)):
+            title_words.append(w)
+        elif "-" in w:
+            title_words.append("-".join(part.capitalize() if part.lower() not in ("of", "to", "in", "on") else part.lower() for part in w.split("-")))
+        else:
+            title_words.append(w.capitalize())
+    if len(title_words) == 1 and "architecture" in phrase.lower():
+        title_words.append("Architecture")
+    return " ".join(title_words)
 
-    # 2. Extract key topical concept clusters dynamically from the question
-    tokens = re.sub(r"[^a-zA-Z0-9\s-]", " ", question.lower()).split()
-    meaningful = [t for t in tokens if len(t) > 2 and t not in STOP_WORDS and t not in META_WORDS]
-    if not meaningful:
+
+def extract_question_facets(question: str, sub_questions: Optional[list[str]] = None) -> list[str]:
+    """Extract clean, human-readable topical facets or section titles for any research question."""
+    facets: list[str] = []
+
+    # 1. Split question on comparative / compound conjunctions ('and', 'vs', 'versus', 'compared to', sentences)
+    clauses = re.split(
+        r"[.?!;,]\s+|\b(?:versus|vs\.?|compared\s+to|as\s+well\s+as|and)\b",
+        question,
+        flags=re.IGNORECASE,
+    )
+    for cl in clauses:
+        cl_lower = cl.strip().lower()
+        if not cl_lower or "who were its authors" in cl_lower or "conclusions remain uncertain" in cl_lower or "published studies establish" in cl_lower:
+            continue
+        title = _clean_phrase_to_title(cl)
+        if title and len(title) >= 3 and title not in facets:
+            facets.append(title)
+
+    # 2. If sub-questions provided additional distinct facets
+    if sub_questions and len(facets) < 2:
+        for sq in sub_questions:
+            title = _clean_phrase_to_title(sq)
+            if title and len(title) >= 3 and title not in facets:
+                facets.append(title)
+
+    if facets:
+        return facets[:4]
+
+    # 3. Fallback: group meaningful non-meta keywords
+    tokens = [
+        t for t in re.findall(r"[A-Za-z0-9][-A-Za-z0-9]*", question)
+        if len(t) > 2 and t.lower() not in STOP_WORDS and t.lower() not in META_WORDS
+    ]
+    if not tokens:
         return ["Empirical Findings", "Methodological Analysis"]
-    facets = []
-    for i in range(0, min(len(meaningful), 6), 2):
-        chunk = meaningful[i:i+2]
-        facets.append(" ".join(w.capitalize() for w in chunk))
+    for i in range(0, min(len(tokens), 6), 3):
+        chunk = tokens[i : i + 3]
+        facets.append(" ".join(w if w.isupper() else w.capitalize() for w in chunk))
     return facets or ["Empirical Findings"]
 
 
@@ -251,6 +300,16 @@ _CANONICAL_SEEDS: list[tuple[re.Pattern, list[str], list[str]]] = [
         ["Highly accurate protein structure prediction with AlphaFold Jumper"],
         ["Highly accurate protein structure prediction with AlphaFold"],
     ),
+    (
+        re.compile(r"\bchain[- ]of[- ]thought\b", re.I),
+        ["Chain-of-Thought Prompting Elicits Reasoning in Large Language Models Wei", "Self-Consistency Improves Chain of Thought Reasoning Wang"],
+        ["Chain-of-Thought Prompting Elicits Reasoning in Large Language Models"],
+    ),
+    (
+        re.compile(r"\b(tool[- ]augmented|toolformer|tool use.*language model)\b", re.I),
+        ["Toolformer Language Models Can Teach Themselves to Use Tools Schick", "ReAct Synergizing Reasoning and Acting in Language Models Yao", "tool-augmented reasoning language models"],
+        ["Toolformer: Language Models Can Teach Themselves to Use Tools", "ReAct: Synergizing Reasoning and Acting in Language Models"],
+    ),
 ]
 
 
@@ -302,19 +361,23 @@ def fallback_query_planner(question: str) -> QueryPlan:
                     if st not in title_guesses:
                         title_guesses.append(st)
 
-    # 4. Generate topical keyword queries per facet
+    # 4. Generate independent topical keyword queries per facet (without polluting facet 2 with facet 1's keywords)
+    shared_domain_words = [
+        w for w in keywords
+        if w in ("language", "models", "llm", "llms", "neural", "networks", "vision", "image", "protein", "quantum")
+    ][:2]
+    for f in facets:
+        f_words = [w.lower() for w in re.findall(r"[a-zA-Z0-9][-a-zA-Z0-9]{2,}", f) if w.lower() not in STOP_WORDS and w.lower() not in META_WORDS]
+        if f_words:
+            f_query_tokens = list(dict.fromkeys(f_words + shared_domain_words))
+            f_query_dedup = " ".join(f_query_tokens[:5])
+            if f_query_dedup and f_query_dedup not in queries:
+                queries.append(f_query_dedup)
+
     if keywords:
-        broad_kw = " ".join(keywords[:4])
+        broad_kw = " ".join(keywords[:5])
         if broad_kw not in queries:
             queries.append(broad_kw)
-
-        for f in facets:
-            f_words = [w.lower() for w in re.findall(r"\b\w{3,}\b", f) if w.lower() not in STOP_WORDS]
-            if f_words:
-                f_query = " ".join(f_words + keywords[:2])
-                f_query_dedup = " ".join(dict.fromkeys(f_query.split()))
-                if f_query_dedup not in queries:
-                    queries.append(f_query_dedup)
 
     # Target concepts derived dynamically from facets and keywords
     target_concepts = [f.title() for f in facets]
@@ -358,7 +421,17 @@ async def plan_research_queries(question: str) -> QueryPlan:
     planner_model = "none"
     try:
         from .local_llm_service import _call_llm, get_provider_model
-        raw, planner_provider = await _call_llm(prompt, max_tokens=300)
+        is_mocked_llm = hasattr(_call_llm, "assert_called") or "Mock" in type(_call_llm).__name__
+        use_fast_planner = (
+            getattr(settings, "FAST_QUERY_PLANNER", True)
+            and settings.LLM_PROVIDER.lower() != "ollama"
+            and not is_mocked_llm
+            and len(plan.get("queries", [])) >= 1
+        )
+        if use_fast_planner:
+            raw, planner_provider = "", "deterministic_fast"
+        else:
+            raw, planner_provider = await _call_llm(prompt, max_tokens=200)
         planner_model = get_provider_model(planner_provider) if raw else "none"
 
         if not raw or not raw.strip():

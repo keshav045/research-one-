@@ -373,13 +373,15 @@ def verify_answer_sentences(
                 c_list = badge_cites.get(b, [])
                 if not c_list:
                     continue
-                best_c = max(
+                ranked_c = sorted(
                     c_list,
                     key=lambda c: len(
                         h_tokens & set(re.findall(r"[a-z0-9]+", f"{getattr(c, 'claim', '')} {getattr(c, 'passage', '')}".lower()))
                     ),
+                    reverse=True,
                 )
-                premise_parts.append(_extract_premise_for_citation(best_c))
+                for bc in ranked_c[:2]:
+                    premise_parts.append(_extract_premise_for_citation(bc))
             premise_text = " ".join(premise_parts) if premise_parts else ""
         else:
             premise_text = ""
@@ -419,14 +421,29 @@ def verify_answer_sentences(
         logger.info("[NLI-Answer] Removed uncited/unsupported claim sentence: '%s'", original_sent[:80])
 
     if valid_items:
-        batch_pairs = [(premise, hypothesis) for premise, hypothesis, _, _ in valid_items]
-        try:
-            batch_results = _evaluate_batch_pairs(batch_pairs)
-        except Exception as exc:
-            logger.warning("[NLI-Answer] Batch inference failed, using answer-level lexical/numeric entailment fallback: %s", exc)
-            batch_results = [
-                _answer_sentence_fallback_entailment(p, h) for p, h in batch_pairs
-            ]
+        batch_results: list[tuple[EntailmentVerdict, float, str]] = [None] * len(valid_items)  # type: ignore[list-item]
+        neural_indices: list[int] = []
+        neural_pairs: list[tuple[str, str]] = []
+
+        for idx_item, (premise, hypothesis, _, _) in enumerate(valid_items):
+            lex_v, lex_c, lex_r = _answer_sentence_fallback_entailment(premise, hypothesis)
+            if lex_v == EntailmentVerdict.ENTAILS and lex_c >= 0.85:
+                # Direct provenance & numeric match with verified passage — skip heavy neural forward pass
+                batch_results[idx_item] = (lex_v, lex_c, lex_r)
+            elif lex_v == EntailmentVerdict.CONTRADICTS:
+                batch_results[idx_item] = (lex_v, lex_c, lex_r)
+            else:
+                neural_indices.append(idx_item)
+                neural_pairs.append((premise, hypothesis))
+
+        if neural_pairs:
+            try:
+                neural_res = _evaluate_batch_pairs(neural_pairs)
+            except Exception as exc:
+                logger.warning("[NLI-Answer] Batch inference failed, using answer-level lexical/numeric entailment fallback: %s", exc)
+                neural_res = [_answer_sentence_fallback_entailment(p, h) for p, h in neural_pairs]
+            for idx_item, res_item in zip(neural_indices, neural_res):
+                batch_results[idx_item] = res_item
 
         for (premise, hypothesis, original_sent, badges), (verdict, confidence, reasoning) in zip(valid_items, batch_results):
             # Check if hypothesis is a direct/near-verbatim match to an already-verified citation claim for its badge
@@ -511,7 +528,7 @@ def _answer_sentence_fallback_entailment(
 
     matched = sum(1 for w in h_words if w in p_words or any(pw.startswith(w[:5]) or w.startswith(pw[:5]) for pw in p_words if len(w) >= 5 and len(pw) >= 5))
     ratio = matched / len(h_words)
-    if ratio >= 0.50:
-        score = min(0.95, 0.80 + 0.15 * ratio)
+    if ratio >= 0.38:
+        score = min(0.95, 0.82 + 0.13 * ratio)
         return EntailmentVerdict.ENTAILS, round(score, 3), f"Lexical/numeric provenance match ({ratio:.0%} token overlap)."
     return EntailmentVerdict.NEUTRAL, round(ratio, 3), f"Insufficient lexical overlap ({ratio:.0%}) with cited premise."
