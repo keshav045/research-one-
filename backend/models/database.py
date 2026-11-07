@@ -69,7 +69,6 @@ class ResearchJob(Base):
     pipeline_json = Column(Text, default="[]")       # JSON pipeline steps
     report_json = Column(Text, nullable=True)        # full JSON report when done
     error_message = Column(Text, nullable=True)
-    uncited_sentences = Column(Integer, default=0)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

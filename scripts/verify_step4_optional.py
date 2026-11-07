@@ -51,8 +51,11 @@ def run_quantization_evaluation():
     db.close()
     passages = sample_passages[:200]
 
-    # Disable disk cache to measure pure inference
+    # Disable disk cache and isolate local backend to measure pure local model inference
+    orig_cache = settings.EMBED_CACHE_ENABLED
+    orig_backend = settings.EMBEDDING_BACKEND
     settings.EMBED_CACHE_ENABLED = False
+    settings.EMBEDDING_BACKEND = "local"
 
     # 1. Unquantized baseline
     settings.EMBED_QUANTIZE = False
@@ -90,6 +93,8 @@ def run_quantization_evaluation():
 
     # Reset
     settings.EMBED_QUANTIZE = False
+    settings.EMBED_CACHE_ENABLED = orig_cache
+    settings.EMBEDDING_BACKEND = orig_backend
     reset_model()
     return {
         "time_fp32": time_fp32,

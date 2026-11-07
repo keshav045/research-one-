@@ -210,6 +210,32 @@ def compute_source_diversity(paper_ids_used: Collection[str]) -> float:
     return float(len(set(paper_ids_used)))
 
 
+def compute_facet_coverage(report_text: str, expected_facets: Sequence[str]) -> float:
+    """Proportion of expected domain facets/concepts covered in synthesized text.
+
+    Returns:
+        Float in [0, 1]; 1.0 if expected_facets is empty.
+    """
+    if not expected_facets:
+        return 1.0
+    if not report_text:
+        return 0.0
+    text_lower = report_text.lower()
+    hits = sum(1 for f in expected_facets if f.strip() and f.strip().lower() in text_lower)
+    return hits / len(expected_facets)
+
+
+def compute_citation_faithfulness(verified_citations: int, total_citations: int) -> float:
+    """Proportion of inline citations that are verified by NLI entailment.
+
+    Returns:
+        Float in [0, 1]; 1.0 if total_citations == 0.
+    """
+    if total_citations <= 0:
+        return 1.0
+    return min(1.0, max(0.0, verified_citations / total_citations))
+
+
 # ── Infrastructure Metrics ────────────────────────────────────────────────────
 
 def compute_pdf_success_rate(
@@ -245,12 +271,13 @@ def summarize_metrics(
     source_diversity: float,
     pdf_success_rate: float,
     latency_seconds: float,
+    facet_coverage: float = 1.0,
 ) -> dict:
     """Bundle all metrics into a single serializable result dict.
 
     Use this to write per-query or aggregate benchmark results to JSON.
     """
-    return {
+    res = {
         "recall_at_5":           round(recall_5, 4),
         "recall_at_10":          round(recall_10, 4),
         "mrr":                   round(mrr, 4),
@@ -263,4 +290,82 @@ def summarize_metrics(
         "source_diversity":      int(source_diversity),
         "pdf_success_rate":      round(pdf_success_rate, 4),
         "latency_seconds":       round(latency_seconds, 3),
+        "facet_coverage":        round(facet_coverage, 4),
     }
+    return res
+
+
+def extract_investigation_metrics(inv: Any, ground_truth_item: dict, latency_seconds: float = 0.0) -> dict:
+    """Extract full grounding, citation, and retrieval metrics from an end-to-end investigation run."""
+    candidate_claims = getattr(inv, "candidate_claims", 0) or 0
+    verified_claims = getattr(inv, "verified_claims", 0) or 0
+    insufficient_claims = getattr(inv, "insufficient_claims", 0) or 0
+
+    evidence_precision = compute_evidence_precision(verified_claims, candidate_claims)
+    unsupported_rate = compute_unsupported_claim_rate(insufficient_claims, candidate_claims)
+
+    citation_integrity = getattr(inv, "citation_integrity", 100.0) or 100.0
+    citation_precision = min(1.0, max(0.0, citation_integrity / 100.0))
+
+    evidence_cov = getattr(inv, "evidence_coverage", 0.0) or 0.0
+    citation_recall = min(1.0, max(0.0, evidence_cov / 100.0))
+
+    report = getattr(inv, "report", None)
+    refs = getattr(report, "references", []) if report else []
+    ref_ids = [getattr(r, "id", str(idx)) for idx, r in enumerate(refs)]
+    source_diversity = compute_source_diversity(ref_ids)
+
+    full_text = getattr(inv, "full_text_papers", 0) or 0
+    analyzed = (
+        getattr(inv, "relevant_papers", 0)
+        or getattr(inv, "unique_papers", 0)
+        or getattr(inv, "papersAnalyzed", 0)
+        or 0
+    )
+    pdf_success = compute_pdf_success_rate(full_text, analyzed)
+
+    expected_facets = ground_truth_item.get("expected_facets", [])
+    report_text_parts: list[str] = []
+    if report:
+        if getattr(report, "executiveSummary", None):
+            report_text_parts.append(report.executiveSummary)
+        for f in getattr(report, "findings", []):
+            if hasattr(f, "paragraphs"):
+                for p in f.paragraphs:
+                    if hasattr(p, "text"):
+                        report_text_parts.append(p.text)
+    full_report_text = " ".join(report_text_parts)
+    facet_cov = compute_facet_coverage(full_report_text, expected_facets)
+
+    ground_truth_keys = set(
+        ground_truth_item.get("expected_arxiv", [])
+        + ground_truth_item.get("expected_dois", [])
+        + [t.lower().strip() for t in ground_truth_item.get("expected_titles", [])]
+    )
+
+    hit = False
+    for r in refs:
+        t = getattr(r, "title", "").lower().strip()
+        doi = getattr(r, "doi", "").lower().strip()
+        arxiv = getattr(r, "arxiv_id", "").lower().strip() if hasattr(r, "arxiv_id") else ""
+        if any(gk in t or (doi and gk == doi) or (arxiv and gk == arxiv) for gk in ground_truth_keys if gk):
+            hit = True
+            break
+
+    evidence_recall = 1.0 if hit else (0.5 if getattr(inv, "evidence_bearing_papers", 0) > 0 else 0.0)
+
+    return summarize_metrics(
+        recall_5=1.0 if hit else 0.0,
+        recall_10=1.0 if hit else 0.0,
+        mrr=1.0 if hit else 0.0,
+        ndcg_10=1.0 if hit else 0.0,
+        evidence_precision=evidence_precision,
+        evidence_recall=evidence_recall,
+        citation_precision=citation_precision,
+        citation_recall=citation_recall,
+        unsupported_claim_rate=unsupported_rate,
+        source_diversity=source_diversity,
+        pdf_success_rate=pdf_success,
+        latency_seconds=latency_seconds,
+        facet_coverage=facet_cov,
+    )

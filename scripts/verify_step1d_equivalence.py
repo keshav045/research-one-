@@ -74,9 +74,11 @@ def main():
     passages = sample_passages[:200]
     print(f"Loaded {len(passages)} real sample passages.")
 
-    # Disable disk cache during this test to measure raw computation
+    # Disable disk cache and force local backend during this test to measure raw computation
     orig_cache = settings.EMBED_CACHE_ENABLED
+    orig_backend = settings.EMBEDDING_BACKEND
     settings.EMBED_CACHE_ENABLED = False
+    settings.EMBEDDING_BACKEND = "local"
 
     try:
         # 1. Compute old embeddings (max_length=512, original order)
@@ -114,6 +116,7 @@ def main():
 
     finally:
         settings.EMBED_CACHE_ENABLED = orig_cache
+        settings.EMBEDDING_BACKEND = orig_backend
 
 
 if __name__ == "__main__":

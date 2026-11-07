@@ -1246,19 +1246,21 @@ async def retrieve_candidate_papers(
 
     async def _run_arxiv_branch() -> None:
         if (ResearchSource.ARXIV in sources or "arXiv" in source_values) and getattr(settings, "ARXIV_ENABLED", True):
-            arxiv_tasks = []
+            query_exprs: list[str] = []
             for title in valid_guesses[:1]:
                 clean_title = re.sub(r'["\']', '', title).strip()
                 if clean_title:
-                    arxiv_tasks.append(_fetch_arxiv_query(f'ti:"{clean_title}"', fetch_limit))
+                    query_exprs.append(f'ti:"{clean_title}"')
             for q in plan.get("queries", [])[:2]:
                 phrase = re.sub(r'["\']', '', q).strip()
                 if phrase:
                     query_expr = _format_arxiv_query_expr(phrase)
-                    if query_expr:
-                        arxiv_tasks.append(_fetch_arxiv_query(query_expr, fetch_limit))
-            if arxiv_tasks:
-                arxiv_results = await asyncio.gather(*arxiv_tasks[:2], return_exceptions=True)
+                    if query_expr and query_expr not in query_exprs:
+                        query_exprs.append(query_expr)
+            selected_exprs = query_exprs[:2]
+            if selected_exprs:
+                arxiv_tasks = [_fetch_arxiv_query(expr, fetch_limit) for expr in selected_exprs]
+                arxiv_results = await asyncio.gather(*arxiv_tasks, return_exceptions=True)
                 for r in arxiv_results:
                     if isinstance(r, list):
                         arxiv_candidates.extend(r)

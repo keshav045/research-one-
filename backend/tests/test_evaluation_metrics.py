@@ -5,10 +5,12 @@ Covers all 11 metrics now defined in evaluation/metrics.py.
 
 import pytest
 from evaluation.metrics import (
+    compute_citation_faithfulness,
     compute_citation_precision,
     compute_citation_recall,
     compute_evidence_precision,
     compute_evidence_recall,
+    compute_facet_coverage,
     compute_mrr,
     compute_ndcg_at_k,
     compute_pdf_success_rate,
@@ -176,6 +178,28 @@ class TestPDFSuccessRate:
         assert compute_pdf_success_rate(0, 5) == 0.0
 
 
+# ─── Facet & Faithfulness Metrics ─────────────────────────────────────────────
+
+class TestFacetAndFaithfulness:
+    def test_facet_coverage_full(self):
+        text = "This report discusses Self-Attention and Multi-Head Attention mechanisms."
+        facets = ["Self-Attention", "Multi-Head Attention"]
+        assert compute_facet_coverage(text, facets) == 1.0
+
+    def test_facet_coverage_partial(self):
+        text = "This report discusses Self-Attention."
+        facets = ["Self-Attention", "Recurrence", "Transduction"]
+        assert pytest.approx(compute_facet_coverage(text, facets), abs=1e-2) == 0.33
+
+    def test_facet_coverage_empty(self):
+        assert compute_facet_coverage("some text", []) == 1.0
+        assert compute_facet_coverage("", ["facet"]) == 0.0
+
+    def test_citation_faithfulness(self):
+        assert compute_citation_faithfulness(8, 10) == 0.8
+        assert compute_citation_faithfulness(0, 0) == 1.0
+
+
 # ─── Aggregate Helper ─────────────────────────────────────────────────────────
 
 class TestSummarizeMetrics:
@@ -186,6 +210,7 @@ class TestSummarizeMetrics:
             citation_precision=0.95, citation_recall=0.8,
             unsupported_claim_rate=0.1, source_diversity=3.0,
             pdf_success_rate=0.75, latency_seconds=12.34,
+            facet_coverage=0.9,
         )
         expected_keys = {
             "recall_at_5", "recall_at_10", "mrr", "ndcg_at_10",
@@ -193,6 +218,7 @@ class TestSummarizeMetrics:
             "citation_precision", "citation_recall",
             "unsupported_claim_rate", "source_diversity",
             "pdf_success_rate", "latency_seconds",
+            "facet_coverage",
         }
         assert set(result.keys()) == expected_keys
 
