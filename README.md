@@ -133,6 +133,45 @@ streamlit run streamlit_app.py
 
 The Streamlit interface will open at `http://localhost:8501`.
 
+### 3. One-Click Local Startup (Both Backend & Frontend)
+
+To launch both the FastAPI backend and Streamlit UI simultaneously:
+
+```bash
+# Windows One-Click
+run_local.bat
+
+# Or using Python runner
+python run_local.py
+```
+
+---
+
+## Evaluation & Benchmarks
+
+ResearchLens undergoes formal 4-level evaluation:
+
+1. **Retrieval Benchmark**: Recall@5, MRR, NDCG@10 across labeled datasets
+   ```bash
+   python -m evaluation.benchmark --max 10
+   ```
+2. **Generation Quality (LLM-as-a-Judge)**: Faithfulness, Answer Relevance, and Completeness
+   ```bash
+   python -m evaluation.generation_eval --max 3
+   ```
+3. **Acceptance Criteria Verification**:
+   ```bash
+   python scripts/verify_acceptance.py
+   ```
+4. **Full Test Suite**:
+   ```bash
+   pytest backend/tests
+   ```
+
+Detailed results and analysis are documented in:
+- [Full Evaluation Report](./evaluation/FULL_EVAL_REPORT.md)
+- [Engineering Audit Report](./AUDIT_REPORT.md)
+
 ---
 
 ## Running Tests
