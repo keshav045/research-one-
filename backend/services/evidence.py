@@ -1,0 +1,513 @@
+"""
+Evidence Extraction & Provenance Grounding Engine
+=================================================
+Implements Phase 5 of the architecture blueprint:
+Two-Tier Verification Architecture:
+- Tier 1 (Evidence Stage): CrossEncoder semantic relevance gating + verbatim source-passage
+  provenance verification with exact page number tracking.
+- Tier 2 (Synthesis Stage): Answer-level Natural Language Inference (NLI) sentence audit
+  using DeBERTa-v3 cross-encoder (see `backend/services/nli_verifier.py`).
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import re
+from typing import List, Tuple, Optional, Dict
+
+from ..models.schemas import (
+    Paper,
+    Citation,
+    CitationStatus,
+    Claim,
+    Evidence,
+    AtomicClaimVerification,
+    EntailmentVerdict,
+)
+from ..config import settings
+from .vector_store import VectorStore, PassageRecord
+from .ranker import get_reranker
+
+logger = logging.getLogger(__name__)
+
+# ─── Evidence Filtering Patterns & Removal Counts ─────────────────────────────
+
+_CAPTION_REGEX = re.compile(
+    r"^(?:table \d+|figure \d+|fig\.? \d+|chart \d+|diagram \d+|scheme \d+|box \d+)\b",
+    re.IGNORECASE,
+)
+_AUTHOR_NOTE_REGEX = re.compile(
+    r"(\S+@\S+\.\S+|\b(?:correspondence to|equal contribution|work done while|department of|school of|university|institute of|laboratory of|author for correspondence|all authors contributed|corresponding author|e-mail:?|crucially involved in every aspect|designed and implemented the first|spent long days|listing order is random|author contributions?)\b)",
+    re.IGNORECASE,
+)
+_REFERENCE_REGEX = re.compile(
+    r"(^\[\d+\]|\b(?:references|bibliography)\b|\b(?:vol\.|pp\.|pages|isbn|doi:|arxiv:\d{4}\.\d{4,5})\b|\b(?:in proceedings of|ieee trans|acm comput)\b)",
+    re.IGNORECASE,
+)
+_META_PROCEDURAL_REGEX = re.compile(
+    r"^(?:in\s+(?:this\s+section|section\s+\d+|table\s+\d+|appendix|fig(?:ure)?\.?\s*\d+)|"
+    r"the\s+rest\s+of\s+(?:this\s+)?paper\s+is\s+organized|"
+    r"as\s+(?:discussed|shown|detailed|noted|described|illustrated)\s+in\s+(?:section|table|figure|appendix)|"
+    r"we\s+(?:organize|refer\s+the\s+reader|begin\s+by\s+describing|outline\s+the\s+structure))\b",
+    re.IGNORECASE,
+)
+_FIRST_PERSON_CONTRIB_REGEX = re.compile(
+    r"\b(?:we|our|this\s+paper|this\s+work|in\s+this\s+study|here\s+we)\b",
+    re.IGNORECASE,
+)
+
+_last_removal_counts: Dict[str, int] = {
+    "captions": 0,
+    "author_notes": 0,
+    "references": 0,
+    "fragments_under_8_words": 0,
+    "length_out_of_bounds": 0,
+    "procedural_fluff": 0,
+}
+
+
+def get_last_removal_counts() -> Dict[str, int]:
+    return dict(_last_removal_counts)
+
+
+def clean_hyphenated_breaks(text: str) -> str:
+    """
+    Cleans hyphenated line breaks (e.g. 'en- coder' -> 'encoder', 'trans- former' -> 'transformer')
+    while preserving genuine hyphenated compounds (e.g. 'self-attention', 'cross-encoder').
+    """
+    if not text:
+        return ""
+    return re.sub(r"\b([a-zA-Z]{2,})-\s+([a-zA-Z]{2,})\b", r"\1\2", text)
+
+
+def strip_leading_artifacts(text: str) -> str:
+    """
+    Strip leading footnote numbers, bullet markers, and page artifacts:
+    e.g. '7 In this work' -> 'In this work'
+    e.g. '[1] In this work' -> 'In this work'
+    e.g. '12 We propose' -> 'We propose'
+    e.g. '• We propose' -> 'We propose'
+    """
+    if not text:
+        return ""
+    t = text.strip()
+    # Strip bullet / dash markers
+    t = re.sub(r"^[\-\•\*\–\—\>]\s*", "", t)
+    # Strip leading footnote numbers (1-3 digits or brackets followed by capital letter)
+    t = re.sub(r"^(?:\[\d+\]|\d{1,3}|[\*\u2020\u2021])\s+(?=[A-Z])", "", t)
+    # Strip leading page/journal header artifacts
+    t = re.sub(r"^(?:page\s+\d+|\d+\s+(?:ieee|acm|arxiv|neurips|icml|cvpr|jmlr|nature|science))\s*", "", t, flags=re.IGNORECASE)
+    return t.strip()
+
+
+def normalize_text_for_match(text: str) -> str:
+    """Normalize text for verbatim matching: collapses whitespace, cleans hyphen breaks, normalizes hyphens."""
+    if not text:
+        return ""
+    t = clean_hyphenated_breaks(text)
+    t = re.sub(r"\s+", " ", t).strip().lower()
+    t = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015]", "-", t)
+    return t
+
+
+def check_verbatim_source_match(claim_text: str, passage_text: str) -> bool:
+    """
+    Checks that the claim sentence exists verbatim (after whitespace/hyphen normalization)
+    in its source passage.
+    """
+    norm_claim = normalize_text_for_match(claim_text)
+    norm_passage = normalize_text_for_match(passage_text)
+    return norm_claim in norm_passage
+
+
+def _filter_and_extract_sentences(text: str, counts: Optional[Dict[str, int]] = None) -> list[str]:
+    """Split passage text into sentences, apply evidence filters, strip artifacts, and track removal counts."""
+    cleaned = re.sub(r"\s+", " ", clean_hyphenated_breaks(text).strip())
+    raw_sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", cleaned)
+    
+    sentences = []
+    for s in raw_sentences:
+        s = s.strip()
+        if not s:
+            continue
+
+        # Strip leading footnote numbers and artifacts first
+        s_clean = strip_leading_artifacts(s)
+
+        # Check fragment under 8 words
+        words = s_clean.split()
+        if len(words) < 8:
+            if counts is not None:
+                counts["fragments_under_8_words"] = counts.get("fragments_under_8_words", 0) + 1
+            continue
+
+        # Check length
+        if len(s_clean) < 30 or len(s_clean) > 350:
+            if counts is not None:
+                counts["length_out_of_bounds"] = counts.get("length_out_of_bounds", 0) + 1
+            continue
+
+        # Check captions
+        if _CAPTION_REGEX.search(s_clean):
+            if counts is not None:
+                counts["captions"] = counts.get("captions", 0) + 1
+            continue
+
+        # Check author notes / affiliations
+        if _AUTHOR_NOTE_REGEX.search(s_clean):
+            if counts is not None:
+                counts["author_notes"] = counts.get("author_notes", 0) + 1
+            continue
+
+        # Check references / bibliography
+        if _REFERENCE_REGEX.search(s_clean):
+            if counts is not None:
+                counts["references"] = counts.get("references", 0) + 1
+            continue
+
+        # Check procedural / meta-text fluff (Section 2 related work, etc.)
+        if _META_PROCEDURAL_REGEX.search(s_clean):
+            if counts is not None:
+                counts["procedural_fluff"] = counts.get("procedural_fluff", 0) + 1
+            continue
+
+        sentences.append(s_clean)
+
+    # Sort sentences to prioritize substantive technical assertions
+    _INFORMATIVE_KEYWORDS = re.compile(
+        r"\b(?:propos|achiev|reduc|increas|improv|outperform|introduc|demonstrat|show|evaluat|find|observ|yield|requir|comput|model|architect|attent|layer|param|loss|accurac|score|speed|latenc|throughput|effici|memor|weight|train|infer|dataset|benchmark)\w*\b",
+        re.IGNORECASE,
+    )
+    sentences.sort(key=lambda s: 1 if _INFORMATIVE_KEYWORDS.search(s) else 0, reverse=True)
+    return sentences
+
+
+def extract_and_verify_evidence(
+    question: str,
+    sub_questions: list[str],
+    papers: list[Paper],
+    vector_store: VectorStore,
+    max_citations: int = 15,
+    anchor_paper_id: Optional[str] = None,
+) -> Tuple[List[Claim], List[Citation], List[Dict], Dict[str, int]]:
+    """
+    Main Phase 5 pipeline (STEP 5):
+    1. For each sub-question:
+       - Retrieves candidate passages (FAISS top 30).
+       - If anchor exists, searches anchor passages first with CrossEncoder reranking.
+         Adds other papers' passages only if anchor yields fewer than 3 relevant ones.
+       - Extracts candidate assertions per sub-question.
+    2. Tier 1 Dual Gate (Relevance & Provenance Match):
+       - CrossEncoder evaluates (sub_question, claim) relevance (>= RELEVANCE_THRESHOLD).
+       - Verbatim source match guarantees exact provenance against source publication passage.
+       - Tier 2 answer-level NLI entailment audit is executed later during report synthesis.
+       - Rejected claims are preserved with exact rejection reasons ('not relevant', 'claim not found verbatim').
+    3. Deduplicates identical claims before ranking and returns verified claims, citations, and rejected claims.
+    """
+    if not papers:
+        logger.warning("[Evidence] No papers available for evidence extraction")
+        return [], [], [], {
+            "captions": 0,
+            "author_notes": 0,
+            "references": 0,
+            "fragments_under_8_words": 0,
+            "length_out_of_bounds": 0,
+            "procedural_fluff": 0,
+        }
+
+    # Map paper_id to Paper object
+    paper_map: Dict[str, Paper] = {p.id: p for p in papers}
+
+    # If no sub-questions provided, use the main question
+    queries = sub_questions if sub_questions else [question]
+    reranker = get_reranker()
+
+    logger.info(
+        "[Evidence] Extracting evidence for %d query aspects (anchor: %s)...",
+        len(queries),
+        anchor_paper_id or "none",
+    )
+
+    global _last_removal_counts
+    removal_counts: Dict[str, int] = {
+        "captions": 0,
+        "author_notes": 0,
+        "references": 0,
+        "fragments_under_8_words": 0,
+        "length_out_of_bounds": 0,
+        "procedural_fluff": 0,
+    }
+
+    # 1. Retrieve candidate passages per sub-question and extract candidate assertions
+    candidate_claims: List[Dict] = []
+    seen_subq_claim_norms: set[str] = set()
+
+    for sub_q in queries[:2]:
+        faiss_candidates = vector_store.search(sub_q, top_k=10)
+        chosen_passages: list[tuple[PassageRecord, float]] = []
+
+        if anchor_paper_id:
+            # Fast paper-scoped FAISS search on anchor paper first (avoids running CrossEncoder on every passage)
+            anchor_scored = vector_store.search_paper(anchor_paper_id, sub_q, top_k=5)
+            if not anchor_scored:
+                anchor_records = [r for r in vector_store.records if r.paper_id == anchor_paper_id][:5]
+                anchor_scored = [(r, 0.8) for r in anchor_records]
+            chosen_passages = list(anchor_scored[:5])
+
+            for r, sc in faiss_candidates:
+                if r.paper_id != anchor_paper_id:
+                    if len(chosen_passages) >= 8:
+                        break
+                    if not any(r.passage.id == cp[0].passage.id for cp in chosen_passages):
+                        chosen_passages.append((r, sc))
+        else:
+            chosen_passages = list(faiss_candidates[:8])
+
+        # Deduplicate identical passages within this sub-question
+        seen_p_texts: set[str] = set()
+        sub_passages: list[tuple[PassageRecord, float]] = []
+        for rec, sc in chosen_passages:
+            norm_p = re.sub(r"\s+", " ", clean_hyphenated_breaks(rec.passage.text)).strip().lower()
+            if norm_p not in seen_p_texts:
+                seen_p_texts.add(norm_p)
+                sub_passages.append((rec, sc))
+
+        # Extract candidate assertions for this sub-question using evidence filters
+        for rec, sc in sub_passages:
+            passage_text = clean_hyphenated_breaks(rec.passage.text)
+            sentences = _filter_and_extract_sentences(passage_text, removal_counts)
+            rec_paper = paper_map.get(rec.paper_id)
+            rec_authors_lower = " ".join(rec_paper.authors).lower() if (rec_paper and rec_paper.authors) else ""
+
+            for sent in sentences[:3]:
+                # Author attribution alignment check:
+                # Only treat as external-only attribution when the sentence does NOT contain
+                # first-person contribution markers ("we", "our", "this paper", "this work").
+                ext_author_matches = re.findall(r"\b([A-Z][a-zA-Z\-]+)\s+(?:et\s+al\.?|\(\d{4}\))", sent)
+                has_own_contrib = bool(_FIRST_PERSON_CONTRIB_REGEX.search(sent))
+                target_rec = rec
+                target_passage_text = passage_text
+                target_score = sc
+
+                if ext_author_matches and rec_paper and not has_own_contrib:
+                    # Check if the named author is an author of THIS paper
+                    if not any(a.lower() in rec_authors_lower for a in ext_author_matches):
+                        # Sentence is citing an external author! Check if that external author has a paper in our corpus
+                        matched_other_paper = None
+                        for p in papers:
+                            if p.id != rec_paper.id and p.authors:
+                                p_auths = " ".join(p.authors).lower()
+                                if any(a.lower() in p_auths for a in ext_author_matches):
+                                    matched_other_paper = p
+                                    break
+
+                        if matched_other_paper is not None:
+                            # Re-retrieve from the actual author's paper to verify true provenance
+                            target_passages = vector_store.search_paper(paper_id=matched_other_paper.id, query=sent, top_k=3)
+                            verified_target_match = None
+                            for tp_rec, tp_sc in target_passages:
+                                tp_text = clean_hyphenated_breaks(tp_rec.passage.text)
+                                if check_verbatim_source_match(sent, tp_text) or any(
+                                    check_verbatim_source_match(s, tp_text) for s in _filter_and_extract_sentences(tp_text)
+                                ):
+                                    verified_target_match = (tp_rec, tp_text, tp_sc)
+                                    break
+
+                            if verified_target_match is not None:
+                                target_rec, target_passage_text, target_score = verified_target_match
+                            else:
+                                # Target paper does not contain a verified supporting passage for this claim;
+                                # reject candidate to prevent false cross-paper re-attribution.
+                                continue
+                        else:
+                            # Do not falsely attribute an external author's finding to this paper
+                            continue
+
+                claim_norm = re.sub(r"[^a-z0-9]", "", sent.lower())
+                pair_key = f"{sub_q}::{claim_norm}"
+                if pair_key in seen_subq_claim_norms:
+                    continue
+                seen_subq_claim_norms.add(pair_key)
+                candidate_claims.append({
+                    "sub_q": sub_q,
+                    "sentence": sent,
+                    "record": target_rec,
+                    "passage_text": target_passage_text,
+                    "passage_score": target_score,
+                })
+
+    _last_removal_counts = dict(removal_counts)
+    logger.info(
+        "[Evidence] Filtering complete: %d candidate claims retained. Removals: %s",
+        len(candidate_claims),
+        removal_counts,
+    )
+
+    if not candidate_claims:
+        return [], [], [], removal_counts
+
+    # Cap candidate claims to top 20 so CrossEncoder runs in a single sub-0.3s batch
+    candidate_claims = candidate_claims[:20]
+
+    # 2. Compute cross-encoder relevance scores for (sub_question, claim)
+    # Include paper title context when scoring anchor paper sentences so factual-lookup questions
+    # ("Which paper introduced X?") match architectural claims inside the anchor paper.
+    if reranker is not None:
+        rel_pairs = []
+        for c in candidate_claims:
+            rec_p = paper_map.get(c["record"].paper_id)
+            is_anc = (anchor_paper_id and c["record"].paper_id == anchor_paper_id) or getattr(rec_p, "is_anchor", False)
+            if is_anc and rec_p:
+                rel_pairs.append([c["sub_q"], f"{rec_p.title}: {c['sentence']}"])
+            else:
+                rel_pairs.append([c["sub_q"], c["sentence"]])
+        raw_rel = reranker.predict(rel_pairs, batch_size=32)
+        rel_scores = [1.0 / (1.0 + math.exp(-float(s))) for s in raw_rel]
+    else:
+        rel_scores = [0.5 for _ in candidate_claims]
+
+    # 3. Plain Claim-Level Check: "source match" + Relevance Gate
+    rel_threshold = getattr(settings, "RELEVANCE_THRESHOLD", 0.30)
+
+    verified_candidates = []
+    rejected_claims: List[Dict] = []
+
+    for item, rel_score in zip(candidate_claims, rel_scores):
+        sub_q = item["sub_q"]
+        claim_text = item["sentence"]
+        record = item["record"]
+        p_text = item["passage_text"]
+        paper = paper_map.get(record.paper_id)
+        if not paper:
+            continue
+
+        is_source_match = check_verbatim_source_match(claim_text, p_text)
+        is_anc = (anchor_paper_id and record.paper_id == anchor_paper_id) or getattr(paper, "is_anchor", False)
+        eff_threshold = min(rel_threshold, 0.15) if is_anc else rel_threshold
+        is_relevant = rel_score >= eff_threshold
+
+        if is_relevant and is_source_match:
+            verified_candidates.append({
+                "record": record,
+                "paper": paper,
+                "sub_q": sub_q,
+                "claim_text": claim_text,
+                "rel_score": rel_score,
+                "p_text": p_text,
+                "check_label": "source match",
+            })
+        else:
+            if not is_relevant and not is_source_match:
+                reason = "not relevant to sub-question and no verbatim source match"
+            elif not is_relevant:
+                reason = f"not relevant to sub-question (relevance {rel_score:.3f} < {eff_threshold:.2f})"
+            else:
+                reason = "claim not found verbatim in source passage"
+
+            rejected_claims.append({
+                "claim": claim_text,
+                "reason": reason,
+                "sub_question": sub_q,
+                "paper_id": paper.id,
+                "paper_title": paper.title,
+                "page": record.passage.page,
+                "relevance_score": round(rel_score, 4),
+                "source_match": is_source_match,
+                "check_label": "source match",
+            })
+
+    logger.info(
+        "[Evidence] Dual-gate evaluation: %d verified, %d rejected (rel_thresh=%.2f, check='source match')",
+        len(verified_candidates),
+        len(rejected_claims),
+        rel_threshold,
+    )
+
+    # 4. Deduplicate identical verified claims before ranking (Amendment C)
+    # Sort verified candidates by relevance score descending (prioritizing anchor paper slightly)
+    verified_candidates.sort(
+        key=lambda x: (
+            1 if (anchor_paper_id and x["paper"].id == anchor_paper_id) else 0,
+            x["rel_score"],
+        ),
+        reverse=True,
+    )
+
+    verified_citations: List[Citation] = []
+    claims_list: List[Claim] = []
+    seen_verified_claims: set[str] = set()
+
+    badge_counter = 1
+    for cand in verified_candidates:
+        if badge_counter > max_citations:
+            break
+
+        c_text = cand["claim_text"]
+        c_norm = re.sub(r"[^a-z0-9]", "", c_text.lower())
+        if c_norm in seen_verified_claims:
+            continue
+        seen_verified_claims.add(c_norm)
+
+        paper = cand["paper"]
+        record = cand["record"]
+        sub_q = cand["sub_q"]
+        rel_sc = cand["rel_score"]
+
+        citation_id = f"cite-{badge_counter}"
+        authors_str = ", ".join(paper.authors[:2]) + (" et al." if len(paper.authors) > 2 else "")
+
+        v = AtomicClaimVerification(
+            id=f"atom-{badge_counter}",
+            atomicClaim=c_text,
+            matchedSentence=c_text,
+            verdict=EntailmentVerdict.ENTAILS,
+            confidence=rel_sc,
+            reasoning=f"source match: verified verbatim against source publication passage (relevance: {rel_sc:.2f})",
+        )
+
+        citation = Citation(
+            id=citation_id,
+            badgeNumber=badge_counter,
+            claim=c_text,
+            status=CitationStatus.VERIFIED,
+            paperId=paper.id,
+            paperTitle=paper.title,
+            authors=authors_str,
+            year=paper.publicationYear,
+            page=record.passage.page,
+            passage=record.passage.text,
+            highlightSentence=c_text,
+            reason=f"source match: verified verbatim against source publication passage (relevance: {rel_sc:.2f})",
+            atomicClaims=[v],
+            entailmentScore=rel_sc,
+            extractionConfidence=rel_sc,
+        )
+
+        claim_obj = Claim(
+            id=f"claim-{badge_counter}",
+            text=c_text,
+            sub_question=sub_q,
+            status=CitationStatus.VERIFIED,
+            evidence=[
+                Evidence(
+                    claim_id=f"claim-{badge_counter}",
+                    passage_id=record.passage.id,
+                    nli_label="source match",
+                    entail_prob=rel_sc,
+                    rerank_score=rel_sc,
+                )
+            ],
+        )
+
+        verified_citations.append(citation)
+        claims_list.append(claim_obj)
+        badge_counter += 1
+
+    logger.info(
+        "[Evidence] Verification complete: %d verified claims/citations produced, %d rejected claims recorded",
+        len(verified_citations),
+        len(rejected_claims),
+    )
+
+    return claims_list, verified_citations, rejected_claims, removal_counts

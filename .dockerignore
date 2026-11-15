@@ -1,0 +1,36 @@
+# Version control
+.git
+.gitignore
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+backend/venv/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Node artifacts
+node_modules/
+npm-debug.log*
+
+# Runtime data & large caches
+pdf_cache/
+*.db
+*.sqlite3
+
+# Scratch & temporary files
+scratch/
+*.log
+*.tmp
+*.bak
+
+# Environment secrets
+.env
+.env.local
+.env.*.local
+backend/.env

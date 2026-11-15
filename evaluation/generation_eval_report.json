@@ -1,0 +1,60 @@
+{
+  "evaluation_type": "generation_quality_llm_as_judge",
+  "judge_model": "gpt-4o-mini",
+  "queries_evaluated": 3,
+  "queries_succeeded": 3,
+  "total_duration_seconds": 59.55,
+  "mean_faithfulness": 4.333,
+  "mean_answer_relevance": 4.333,
+  "mean_completeness": 4.0,
+  "mean_overall": 4.223,
+  "faithfulness_norm": 0.867,
+  "answer_relevance_norm": 0.867,
+  "completeness_norm": 0.8,
+  "overall_norm": 0.845,
+  "per_query": [
+    {
+      "id": "bench-01-transformer",
+      "question": "Which paper introduced the Transformer architecture, and what was its key idea?",
+      "domain": "Machine Learning / NLP",
+      "question_type": "factual_lookup",
+      "difficulty": "easy",
+      "faithfulness": 3,
+      "answer_relevance": 3,
+      "completeness": 2,
+      "overall": 2.67,
+      "report_length_chars": 461,
+      "pipeline_latency_seconds": 24.81,
+      "judge_latency_seconds": 1.25
+    },
+    {
+      "id": "bench-02-rag",
+      "question": "What is retrieval-augmented generation and who proposed it?",
+      "domain": "Information Retrieval / NLP",
+      "question_type": "factual_lookup",
+      "difficulty": "easy",
+      "faithfulness": 5,
+      "answer_relevance": 5,
+      "completeness": 5,
+      "overall": 5.0,
+      "report_length_chars": 1906,
+      "pipeline_latency_seconds": 15.64,
+      "judge_latency_seconds": 1.44
+    },
+    {
+      "id": "bench-03-bert",
+      "question": "Which paper introduced BERT for language representation?",
+      "domain": "Machine Learning / NLP",
+      "question_type": "factual_lookup",
+      "difficulty": "easy",
+      "faithfulness": 5,
+      "answer_relevance": 5,
+      "completeness": 5,
+      "overall": 5.0,
+      "report_length_chars": 1186,
+      "pipeline_latency_seconds": 15.29,
+      "judge_latency_seconds": 1.12
+    }
+  ],
+  "grade": "B  (Good)"
+}

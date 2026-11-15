@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  # ── Python FastAPI Backend ─────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: researchlens-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
+      - SEMANTIC_SCHOLAR_API_KEY=${SEMANTIC_SCHOLAR_API_KEY:-}
+      - DATABASE_URL=${DATABASE_URL:-sqlite:///./data/researchlens.db}
+      - NLI_MODEL=${NLI_MODEL:-cross-encoder/nli-deberta-v3-small}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
+      - NLI_DEVICE=${NLI_DEVICE:-cpu}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:80}
+      - PDF_CACHE_DIR=/app/data/pdf_cache
+      - HOST=0.0.0.0
+      - PORT=8000
+    volumes:
+      - researchlens_data:/app/data
+      - huggingface_cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  researchlens_data:
+  huggingface_cache:
