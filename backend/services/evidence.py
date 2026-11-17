@@ -71,20 +71,6 @@ def get_last_removal_counts() -> Dict[str, int]:
     return dict(_last_removal_counts)
 
 
-ARXIV_WATERMARK_REGEX = re.compile(
-    r"arXiv:\s*(?:\d{4}\.\d{4,5}|[a-zA-Z\-]+/\d{7})(?:v\d+)?(?:\s*\[[a-zA-Z\.\-]+\])?(?:\s*\d+\s+[A-Za-z]+\s+\d{4})?",
-    re.IGNORECASE,
-)
-
-
-def strip_arxiv_watermarks(text: str) -> str:
-    """Removes arXiv margin stamps such as 'arXiv:2103.14030v2 [cs.CV] 17 Aug 2021'."""
-    if not text:
-        return ""
-    t = ARXIV_WATERMARK_REGEX.sub("", text)
-    return re.sub(r"\s+", " ", t).strip()
-
-
 def clean_hyphenated_breaks(text: str) -> str:
     """
     Cleans hyphenated line breaks (e.g. 'en- coder' -> 'encoder', 'trans- former' -> 'transformer')
@@ -92,8 +78,7 @@ def clean_hyphenated_breaks(text: str) -> str:
     """
     if not text:
         return ""
-    t = strip_arxiv_watermarks(text)
-    return re.sub(r"\b([a-zA-Z]{2,})-\s+([a-zA-Z]{2,})\b", r"\1\2", t)
+    return re.sub(r"\b([a-zA-Z]{2,})-\s+([a-zA-Z]{2,})\b", r"\1\2", text)
 
 
 def strip_leading_artifacts(text: str) -> str:
@@ -258,27 +243,26 @@ def extract_and_verify_evidence(
     candidate_claims: List[Dict] = []
     seen_subq_claim_norms: set[str] = set()
 
-    # Expand query coverage from 2 to up to 4 sub-queries for complete facet coverage
-    for sub_q in queries[:4]:
+    for sub_q in queries[:2]:
         faiss_candidates = vector_store.search(sub_q, top_k=10)
         chosen_passages: list[tuple[PassageRecord, float]] = []
 
         if anchor_paper_id:
-            # Fast paper-scoped FAISS search on anchor paper first
-            anchor_scored = vector_store.search_paper(anchor_paper_id, sub_q, top_k=6)
+            # Fast paper-scoped FAISS search on anchor paper first (avoids running CrossEncoder on every passage)
+            anchor_scored = vector_store.search_paper(anchor_paper_id, sub_q, top_k=5)
             if not anchor_scored:
-                anchor_records = [r for r in vector_store.records if r.paper_id == anchor_paper_id][:6]
-                anchor_scored = [(r, 0.85) for r in anchor_records]
-            chosen_passages = list(anchor_scored[:6])
+                anchor_records = [r for r in vector_store.records if r.paper_id == anchor_paper_id][:5]
+                anchor_scored = [(r, 0.8) for r in anchor_records]
+            chosen_passages = list(anchor_scored[:5])
 
             for r, sc in faiss_candidates:
                 if r.paper_id != anchor_paper_id:
-                    if len(chosen_passages) >= 12:
+                    if len(chosen_passages) >= 8:
                         break
                     if not any(r.passage.id == cp[0].passage.id for cp in chosen_passages):
                         chosen_passages.append((r, sc))
         else:
-            chosen_passages = list(faiss_candidates[:10])
+            chosen_passages = list(faiss_candidates[:8])
 
         # Deduplicate identical passages within this sub-question
         seen_p_texts: set[str] = set()
@@ -295,21 +279,18 @@ def extract_and_verify_evidence(
             sentences = _filter_and_extract_sentences(passage_text, removal_counts)
             rec_paper = paper_map.get(rec.paper_id)
             rec_authors_lower = " ".join(rec_paper.authors).lower() if (rec_paper and rec_paper.authors) else ""
-            is_anchor_rec = bool(anchor_paper_id and rec.paper_id == anchor_paper_id)
 
-            for sent in sentences[:5]:
+            for sent in sentences[:3]:
                 # Author attribution alignment check:
-                # Do NOT discard anchor paper comparative sentences or sentences with first-person contribution
+                # Only treat as external-only attribution when the sentence does NOT contain
+                # first-person contribution markers ("we", "our", "this paper", "this work").
                 ext_author_matches = re.findall(r"\b([A-Z][a-zA-Z\-]+)\s+(?:et\s+al\.?|\(\d{4}\))", sent)
                 has_own_contrib = bool(_FIRST_PERSON_CONTRIB_REGEX.search(sent))
-                has_comparative_framing = bool(
-                    re.search(r"\b(?:without using|dispens|relying entirely|in contrast|instead of|recurrent|convolution|attention|transformer|first)\b", sent, re.IGNORECASE)
-                )
                 target_rec = rec
                 target_passage_text = passage_text
                 target_score = sc
 
-                if ext_author_matches and rec_paper and not has_own_contrib and not (is_anchor_rec and has_comparative_framing):
+                if ext_author_matches and rec_paper and not has_own_contrib:
                     # Check if the named author is an author of THIS paper
                     if not any(a.lower() in rec_authors_lower for a in ext_author_matches):
                         # Sentence is citing an external author! Check if that external author has a paper in our corpus
@@ -336,8 +317,11 @@ def extract_and_verify_evidence(
                             if verified_target_match is not None:
                                 target_rec, target_passage_text, target_score = verified_target_match
                             else:
+                                # Target paper does not contain a verified supporting passage for this claim;
+                                # reject candidate to prevent false cross-paper re-attribution.
                                 continue
                         else:
+                            # Do not falsely attribute an external author's finding to this paper
                             continue
 
                 claim_norm = re.sub(r"[^a-z0-9]", "", sent.lower())
@@ -363,8 +347,8 @@ def extract_and_verify_evidence(
     if not candidate_claims:
         return [], [], [], removal_counts
 
-    # Cap candidate claims to top 40 for comprehensive multi-facet coverage
-    candidate_claims = candidate_claims[:40]
+    # Cap candidate claims to top 20 so CrossEncoder runs in a single sub-0.3s batch
+    candidate_claims = candidate_claims[:20]
 
     # 2. Compute cross-encoder relevance scores for (sub_question, claim)
     # Include paper title context when scoring anchor paper sentences so factual-lookup questions

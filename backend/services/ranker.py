@@ -958,9 +958,9 @@ def rank_papers(
             overlap = sum(1 for w in q_tokens if w in t_lower) * 3.0 + sum(1 for w in q_tokens if w in a_lower) * 0.5
             cites = max(0, getattr(p, "citationCount", 0) or 0)
             if overlap == 0:
-                # Only preserve high-citation candidate if it matches title guess or anchor paper
-                if p_norm in guess_norms or (anchor_id and (p.id == anchor_id or p_norm == anchor_norm)):
-                    return 5e5
+                # Preserve high-citation landmark candidates when surface terminology differs (e.g. word2vec -> vector space)
+                if question_type == "factual_lookup" and cites >= getattr(settings, "ANCHOR_MIN_CITATIONS", 1000):
+                    return math.log1p(cites) * 0.5
                 return 0.0
             return overlap + math.log1p(cites)
 
@@ -1160,14 +1160,16 @@ def rank_papers(
                 seen_pids.add(kt_p.id)
 
         ranked_pool.sort(key=lambda p: getattr(p, 'relevance_score', 0.0), reverse=True)
-        # Fill remaining slots from ranked_pool up to target_count, strictly requiring topic relevance
+        # Fill remaining slots from ranked_pool up to target_count, preferring topic-matching candidates
         for p in ranked_pool:
             if len(final_ranked) >= target_count:
                 break
-            # Disqualify off-topic megapapers with 0% query topic overlap (e.g. Scikit-learn on a Transformer question)
-            is_off_topic = any("zero_topic_overlap_penalty" in r for r in getattr(p, "relevance_reasons", []))
-            if is_off_topic:
-                continue
+            if p.id not in seen_pids and not any("zero_topic_overlap_penalty" in r for r in getattr(p, "relevance_reasons", [])):
+                final_ranked.append(p)
+                seen_pids.add(p.id)
+        for p in ranked_pool:
+            if len(final_ranked) >= target_count:
+                break
             if p.id not in seen_pids:
                 final_ranked.append(p)
                 seen_pids.add(p.id)
