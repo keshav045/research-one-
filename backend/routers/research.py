@@ -40,6 +40,15 @@ async def start_research(
     Create a new research job and immediately start the pipeline in the background.
     Returns the job record (status=in_progress) straight away.
     """
+    # Validate character limit, academic safety, and research scope before starting
+    from ..security import validate_research_query
+    is_valid, validation_err = validate_research_query(req.question)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=validation_err,
+        )
+
     job_id = f"research-{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
 

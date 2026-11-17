@@ -168,3 +168,125 @@ def check_academic_safety(query: str) -> tuple[bool, Optional[str]]:
             return False, f"Refused: Request violates academic integrity policy ({category.replace('_', ' ')})."
     return True, None
 
+
+# ─── Academic Scope & Relevance Guard ─────────────────────────────────────────
+
+NON_ACADEMIC_PATTERNS = [
+    (r"\b(?:recipe|cook(?:ing)?|bake|baking|pizza|dough|pasta|burger|cake|ingredient|delicious|dinner|breakfast|lunch)\b", "culinary_recipe"),
+    (r"\b(?:football|cricket|premier league|nba|fifa|match score|game score|who won the match|sports team)\b", "sports_and_games"),
+    (r"\b(?:bedtime story|fairy tale|dragon|netflix|movie recommendation|romantic comedy|song lyrics|celebrity gossip)\b", "entertainment_fiction"),
+    (r"\b(?:book a hotel|flight ticket|room in paris|restaurant near me|vacation in|cheap shoes|buy product)\b", "commercial_lifestyle"),
+    (r"^(?:hi|hello|hey|good morning|good evening|how are you|who are you|what is your name|tell me a joke)\b", "casual_chat"),
+    (r"\b(?:invest (?:my )?money in (?:bitcoin|ethereum|crypto|stocks)|crypto price prediction|stock pick)\b", "financial_speculation"),
+]
+
+ACADEMIC_SCHOLARLY_KEYWORDS = {
+    # Scholarly metadata & literature terminology
+    "paper", "papers", "study", "studies", "author", "authors", "doi", "arxiv", "journal", "conference",
+    "proceedings", "literature", "review", "findings", "empirical", "methodology", "algorithm",
+    "architecture", "architectures", "mechanism", "mechanisms", "framework", "formulation",
+    "theorem", "hypothesis", "dataset", "datasets", "benchmark", "benchmarks", "sota",
+    "ablation", "evaluation", "citation", "citations", "survey", "paradigm", "proof", "experiment",
+    # Computer Science, Machine Learning & AI
+    "transformer", "transformers", "attention", "self-attention", "neural", "deep learning",
+    "machine learning", "gradient", "gradients", "backpropagation", "convolution", "convolutional",
+    "cnn", "rnn", "lstm", "diffusion", "latent diffusion", "gan", "generative adversarial",
+    "reinforcement learning", "lora", "fine-tuning", "rag", "retrieval", "retrieval-augmented",
+    "embeddings", "embedding", "vector", "bert", "resnet", "encoder", "decoder", "nlp",
+    "computer vision", "optimization", "adam", "sgd", "loss function", "stochastic",
+    "hyperparameter", "llm", "llms", "language model", "tokenization", "tokens",
+    # Natural, Physical & Formal Sciences
+    "crispr", "cas9", "genome", "genomics", "gene", "genes", "dna", "rna", "protein", "proteins",
+    "mutation", "mutations", "clinical", "efficacy", "pathway", "therapy", "cellular", "receptor",
+    "biology", "biological", "biomedical", "pharmacology", "immunology", "quantum", "thermodynamics",
+    "relativity", "particle", "gravity", "semiconductor", "spectroscopy", "superconductor",
+    "differential equation", "linear algebra", "eigenvalue", "eigenvalues", "manifold", "topology",
+    # Social Sciences & Economics
+    "econometrics", "macroeconomic", "macroeconomics", "microeconomics", "monetary policy",
+    "inflation", "sociological", "psychological", "cognitive", "behavioral", "ethnography",
+    "regression", "causality", "correlation", "game theory"
+}
+
+MIN_QUESTION_LENGTH = 10
+MAX_QUESTION_LENGTH = 500
+
+
+def check_academic_scope(query: str) -> tuple[bool, Optional[str]]:
+    """
+    Evaluates whether an inquiry is related to academic research / scientific literature.
+    Returns (is_in_scope, refusal_reason).
+    """
+    q_clean = (query or "").strip()
+    q_lower = q_clean.lower()
+
+    # 1. Check for explicit non-academic categories
+    for pattern, category in NON_ACADEMIC_PATTERNS:
+        if re.search(pattern, q_lower):
+            category_label = category.replace("_", " ").title()
+            return (
+                False,
+                f"Out of Scope ({category_label}): ResearchLens is an academic research assistant designed to analyze scientific papers, methodologies, and literature reviews. Please ask a research-related question."
+            )
+
+    # 2. Extract word tokens (3+ letters)
+    tokens = set(re.findall(r"\b[a-z]{3,}\b", q_lower))
+    academic_hits = len(tokens.intersection(ACADEMIC_SCHOLARLY_KEYWORDS))
+
+    # 3. Check for structural academic inquiry patterns
+    has_scholarly_structure = bool(
+        re.search(
+            r"\b(?:which paper|what paper|who (?:introduced|proposed|discovered)|"
+            r"compare\s+.*?\s+and|difference between\s+.*?\s+and|"
+            r"what is the mechanism of|how does\s+.*?\s+(?:work|operate|reduce|improve|scale)|"
+            r"what are the limitations of|state of the art in|findings on|evidence for)\b",
+            q_lower
+        )
+    )
+
+    if academic_hits >= 1 or has_scholarly_structure:
+        return True, None
+
+    return (
+        False,
+        "Out of Scope: Your query does not appear to be an academic or scientific research question. Please ask a question related to research papers, algorithms, architectures, scientific studies, or literature reviews."
+    )
+
+
+def validate_research_query(query: str) -> tuple[bool, Optional[str]]:
+    """
+    Pre-flight validator for research questions before entering the pipeline.
+    Validates:
+      1. Minimum & maximum character limits (10 to 500 characters).
+      2. Academic safety, anti-ghostwriting, and ethics policies.
+      3. Academic scope and relevance to research literature.
+    Returns (is_valid, error_message).
+    """
+    if not query or not query.strip():
+        return False, "Please enter a research question."
+
+    q_clean = query.strip()
+    if len(q_clean) < MIN_QUESTION_LENGTH:
+        return (
+            False,
+            f"Question is too short ({len(q_clean)} characters). Minimum question length is {MIN_QUESTION_LENGTH} characters. Please provide a more descriptive research question."
+        )
+
+    if len(q_clean) > MAX_QUESTION_LENGTH:
+        return (
+            False,
+            f"Question is too long ({len(q_clean)} characters). Maximum question length is {MAX_QUESTION_LENGTH} characters. Please condense your question."
+        )
+
+    # Check academic ethics and safety
+    is_safe, safety_err = check_academic_safety(q_clean)
+    if not is_safe:
+        return False, safety_err
+
+    # Check academic scope
+    is_scope, scope_err = check_academic_scope(q_clean)
+    if not is_scope:
+        return False, scope_err
+
+    return True, None
+
+

@@ -334,6 +334,16 @@ async def run_research_pipeline(job_id: str, db: Session) -> None:
         depth = ResearchDepth(job.depth)
         sources = [ResearchSource(s) for s in job.get_sources()]
 
+        # ─── Pre-flight Scope & Character Validation ──────────────────────────
+        from ..security import validate_research_query
+        is_valid, validation_err = validate_research_query(question)
+        if not is_valid:
+            logger.warning("[Pipeline] Refused query: %s", validation_err)
+            job.status = "failed"
+            job.failure_reason = validation_err
+            db.commit()
+            return job_to_investigation(job)
+
         # ─── Phase 1: Query Planning ──────────────────────────────────────────
         t0 = time.time()
         logger.info("[Pipeline] Stage 1: Query Planning for '%s'", question[:80])

@@ -645,8 +645,9 @@ with tab_research:
         "Research Question",
         value=st.session_state.get("prefill_question", default_question),
         height=90,
-        placeholder="e.g. Compare ReAct (Reasoning + Acting), Chain-of-Thought prompting, and tool-augmented",
-        help="Be as specific as possible. Mentioning key technical concepts or domains yields better candidate retrieval.",
+        max_chars=500,
+        placeholder="e.g. Compare ReAct (Reasoning + Acting), Chain-of-Thought prompting, and tool-augmented LLMs",
+        help="Be as specific as possible (10 to 500 characters). Mentioning key technical concepts, architectures, or domains yields better candidate retrieval.",
     )
 
     col_btn, col_clear = st.columns([3, 1])
@@ -666,8 +667,11 @@ with tab_research:
 
     # ── Pipeline Execution Flow ───────────────────────────────────────────────
     if run_clicked:
-        if not question_input.strip():
-            st.error("Please enter a research question.")
+        from backend.security import validate_research_query
+        is_valid, validation_err = validate_research_query(question_input)
+        if not is_valid:
+            st.error(f"❌ {validation_err}")
+            st.info("💡 **Tip:** ResearchLens is designed to analyze academic papers, scientific methodologies, algorithms, and literature reviews. Please ask a research-oriented question (e.g., *'What is the architecture of Transformer models?'* or *'Compare ReAct, Chain-of-Thought, and Tool-Augmented LLMs'*).")
             st.stop()
 
         if not settings.is_llm_configured:
