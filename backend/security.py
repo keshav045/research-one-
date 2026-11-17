@@ -174,10 +174,11 @@ def check_academic_safety(query: str) -> tuple[bool, Optional[str]]:
 NON_ACADEMIC_PATTERNS = [
     (r"\b(?:recipe|cook(?:ing)?|bake|baking|pizza|dough|pasta|burger|cake|ingredient|delicious|dinner|breakfast|lunch)\b", "culinary_recipe"),
     (r"\b(?:football|cricket|premier league|nba|fifa|match score|game score|who won the match|sports team)\b", "sports_and_games"),
-    (r"\b(?:bedtime story|fairy tale|dragon|netflix|movie recommendation|romantic comedy|song lyrics|celebrity gossip)\b", "entertainment_fiction"),
-    (r"\b(?:book a hotel|flight ticket|room in paris|restaurant near me|vacation in|cheap shoes|buy product)\b", "commercial_lifestyle"),
+    (r"\b(?:bedtime story|fairy tale|dragon|netflix|movie recommendation|romantic comedy|song lyrics|celebrity gossip|poem|write a story)\b", "entertainment_fiction"),
+    (r"\b(?:book a hotel|flight ticket|room in paris|restaurant near me|vacation in|cheap shoes|buy product|grocery store)\b", "commercial_lifestyle"),
     (r"^(?:hi|hello|hey|good morning|good evening|how are you|who are you|what is your name|tell me a joke)\b", "casual_chat"),
     (r"\b(?:invest (?:my )?money in (?:bitcoin|ethereum|crypto|stocks)|crypto price prediction|stock pick)\b", "financial_speculation"),
+    (r"\b(?:my mom|my dad|my dog|my cat|my friend|my boyfriend|my girlfriend|my trip|my vacation|walked down the street)\b", "personal_narrative"),
 ]
 
 ACADEMIC_SCHOLARLY_KEYWORDS = {
@@ -195,6 +196,7 @@ ACADEMIC_SCHOLARLY_KEYWORDS = {
     "embeddings", "embedding", "vector", "bert", "resnet", "encoder", "decoder", "nlp",
     "computer vision", "optimization", "adam", "sgd", "loss function", "stochastic",
     "hyperparameter", "llm", "llms", "language model", "tokenization", "tokens",
+    "prompt", "prompting", "react", "chain-of-thought", "cot", "augmented", "imagenet",
     # Natural, Physical & Formal Sciences
     "crispr", "cas9", "genome", "genomics", "gene", "genes", "dna", "rna", "protein", "proteins",
     "mutation", "mutations", "clinical", "efficacy", "pathway", "therapy", "cellular", "receptor",
@@ -204,8 +206,14 @@ ACADEMIC_SCHOLARLY_KEYWORDS = {
     # Social Sciences & Economics
     "econometrics", "macroeconomic", "macroeconomics", "microeconomics", "monetary policy",
     "inflation", "sociological", "psychological", "cognitive", "behavioral", "ethnography",
-    "regression", "causality", "correlation", "game theory"
+    "regression", "causality", "correlation", "game theory", "annealing", "qubit"
 }
+
+INQUIRY_VERBS_PATTERN = (
+    r"^(?:what|which|how|why|who|whom|whose|is|are|was|were|do|does|did|can|could|should|would|"
+    r"compare|comparing|contrast|explain|evaluate|analyze|investigate|review|survey|synthesize|"
+    r"discuss|summarize|examine|assess|describe|empirical|benchmark|benchmarks|overview|advances|study|studies)\b"
+)
 
 MIN_QUESTION_LENGTH = 10
 MAX_QUESTION_LENGTH = 500
@@ -214,12 +222,13 @@ MAX_QUESTION_LENGTH = 500
 def check_academic_scope(query: str) -> tuple[bool, Optional[str]]:
     """
     Evaluates whether an inquiry is related to academic research / scientific literature.
+    Rejects raw narrative paragraphs, stories, and non-academic domains.
     Returns (is_in_scope, refusal_reason).
     """
     q_clean = (query or "").strip()
     q_lower = q_clean.lower()
 
-    # 1. Check for explicit non-academic categories
+    # 1. Check for explicit non-academic categories (recipes, sports, entertainment, casual chat)
     for pattern, category in NON_ACADEMIC_PATTERNS:
         if re.search(pattern, q_lower):
             category_label = category.replace("_", " ").title()
@@ -228,18 +237,43 @@ def check_academic_scope(query: str) -> tuple[bool, Optional[str]]:
                 f"Out of Scope ({category_label}): ResearchLens is an academic research assistant designed to analyze scientific papers, methodologies, and literature reviews. Please ask a research-related question."
             )
 
-    # 2. Extract word tokens (3+ letters)
+    # 2. Rejection of narrative blocks: multiple declarative sentences with no inquiry starter and no question mark
+    sentences = [s.strip() for s in re.split(r"[\.\n]+", q_clean) if s.strip()]
+    has_qmark = "?" in q_clean
+    starts_inquiry = bool(re.match(INQUIRY_VERBS_PATTERN, q_clean, re.IGNORECASE))
+
+    if len(sentences) >= 2 and not has_qmark and not starts_inquiry:
+        return (
+            False,
+            "Invalid Inquiry: The input appears to be a narrative paragraph or statement rather than a research question. Please formulate your query as a specific research question (e.g. 'How does X work?' or 'Compare X and Y')."
+        )
+
+    # 3. Check for question framing (must contain question mark, inquiry verb, or scholarly comparative phrase)
+    if not has_qmark and not starts_inquiry:
+        has_scholarly_topic_phrase = bool(
+            re.search(
+                r"\b(?:empirical (?:benchmark|study|analysis)|state of the art in|literature review on|advances in|comparison of|benchmark of)\b",
+                q_lower,
+            )
+        )
+        if not has_scholarly_topic_phrase:
+            return (
+                False,
+                "Invalid Inquiry: Missing question framing. Please ask a specific question ending with '?' or starting with an inquiry keyword such as 'Compare', 'Explain', 'What is', or 'How does'."
+            )
+
+    # 4. Extract word tokens (3+ letters) and check intersection with academic concepts
     tokens = set(re.findall(r"\b[a-z]{3,}\b", q_lower))
     academic_hits = len(tokens.intersection(ACADEMIC_SCHOLARLY_KEYWORDS))
 
-    # 3. Check for structural academic inquiry patterns
+    # 5. Check for structural academic inquiry patterns
     has_scholarly_structure = bool(
         re.search(
             r"\b(?:which paper|what paper|who (?:introduced|proposed|discovered)|"
             r"compare\s+.*?\s+and|difference between\s+.*?\s+and|"
             r"what is the mechanism of|how does\s+.*?\s+(?:work|operate|reduce|improve|scale)|"
             r"what are the limitations of|state of the art in|findings on|evidence for)\b",
-            q_lower
+            q_lower,
         )
     )
 
@@ -248,7 +282,7 @@ def check_academic_scope(query: str) -> tuple[bool, Optional[str]]:
 
     return (
         False,
-        "Out of Scope: Your query does not appear to be an academic or scientific research question. Please ask a question related to research papers, algorithms, architectures, scientific studies, or literature reviews."
+        "Out of Scope: No academic or scientific concepts detected. Please ask a question related to published research papers, algorithms, architectures, scientific studies, or literature reviews."
     )
 
 
