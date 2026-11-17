@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import re
 import secrets
 import threading
 import time
@@ -142,3 +143,28 @@ async def verify_api_key(
         )
 
     return provided
+
+
+# ─── Academic Integrity & Safety Guard ────────────────────────────────────────
+
+UNETHICAL_ACADEMIC_PATTERNS = [
+    (r"\b(?:fabricat|forge|fake)\s+(?:\d+\s+)?(?:paper|citation|doi|reference|author)", "citation_fraud"),
+    (r"\b(?:write\s+(?:my|a)\s+.*?(?:dissertation|thesis|essay|paper)\s+.*?(?:without\s+citing|verbatim|as\s+my\s+own)|ghostwrit)", "ghostwriting_plagiarism"),
+    (r"\b(?:jailbreak|dan\s*(?:\(|do\s*anything\s*now)|ignore\s+all\s+(?:academic|previous)\s+limitations)", "jailbreak_attempt"),
+    (r"\b(?:malware|keylogger|trojan|ransomware|exploit\s+script)", "malicious_code"),
+    (r"\b(?:ddos|denial\s+of\s+service|attack\s+against\s+(?:arxiv|openalex|crossref|server))", "academic_sabotage"),
+    (r"\b(?:generate\s+false\s+benchmark|falsif(?:y|ication)\s+(?:data|number|result))", "data_falsification")
+]
+
+
+def check_academic_safety(query: str) -> tuple[bool, Optional[str]]:
+    """
+    Evaluates whether an inquiry violates academic ethics or safety guardrails.
+    Returns (is_safe, refusal_reason).
+    """
+    q_lower = (query or "").lower()
+    for pattern, category in UNETHICAL_ACADEMIC_PATTERNS:
+        if re.search(pattern, q_lower):
+            return False, f"Refused: Request violates academic integrity policy ({category.replace('_', ' ')})."
+    return True, None
+

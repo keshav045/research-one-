@@ -36,6 +36,8 @@ __pycache__/
 
 # PDF download cache (created at runtime)
 pdf_cache/
+*.jpeg
+*.jpg
 
 # ─── Environment / Secrets ────────────────────────────────────────────────────
 # NEVER commit real API keys
