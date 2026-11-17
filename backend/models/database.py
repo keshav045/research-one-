@@ -168,7 +168,42 @@ class PaperRecord(Base):
 
 
 def create_tables() -> None:
-    Base.metadata.create_all(bind=engine)
+    """Creates database tables with robust writable fallback for cloud hosting."""
+    global engine, SessionLocal
+    try:
+        Base.metadata.create_all(bind=engine)
+    except Exception as exc:
+        logger.warning(
+            "Primary database table creation failed with URL '%s': %s",
+            settings.DATABASE_URL,
+            exc,
+        )
+        if "sqlite" in settings.DATABASE_URL:
+            import tempfile
+            from pathlib import Path
+            tmp_db = Path(tempfile.gettempdir()) / "researchlens_st.db"
+            fallback_url = f"sqlite:///{tmp_db.resolve().as_posix()}"
+            logger.info("Retrying table creation using writable fallback: %s", fallback_url)
+            try:
+                engine = create_engine(
+                    fallback_url,
+                    connect_args={"check_same_thread": False},
+                    echo=False,
+                )
+                SessionLocal.configure(bind=engine)
+                Base.metadata.create_all(bind=engine)
+                logger.info("Fallback database successfully initialized at %s", fallback_url)
+            except Exception as inner_exc:
+                logger.warning("File fallback failed, switching to in-memory SQLite: %s", inner_exc)
+                engine = create_engine(
+                    "sqlite:///:memory:",
+                    connect_args={"check_same_thread": False},
+                    echo=False,
+                )
+                SessionLocal.configure(bind=engine)
+                Base.metadata.create_all(bind=engine)
+        else:
+            raise
 
 
 def get_db():

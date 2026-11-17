@@ -89,9 +89,35 @@ elif _gemini_key and _gemini_key.strip() not in ("your_gemini_api_key_here", "xx
 else:
     os.environ.setdefault("LLM_PROVIDER", "openai")
 
-# Writable SQLite DB path (works locally and in ephemeral cloud container)
-_db_file = os.getenv("STREAMLIT_DB_PATH", str(_PROJECT_ROOT / "researchlens_st.db"))
-os.environ.setdefault("DATABASE_URL", f"sqlite:///{Path(_db_file).resolve()}")
+# Writable SQLite DB and Cache path (works locally and in ephemeral cloud container)
+import tempfile
+
+def _get_cloud_safe_db_url() -> str:
+    custom_url = os.getenv("DATABASE_URL")
+    if custom_url and not custom_url.endswith("researchlens.db"):
+        return custom_url
+
+    # Check if on Streamlit Cloud or containerized Linux
+    is_cloud = bool(
+        os.getenv("STREAMLIT_SHARING_MODE")
+        or os.getenv("HOSTNAME", "").startswith("streamlit")
+        or Path("/mount/src").exists()
+    )
+    if is_cloud:
+        tmp_db = Path(tempfile.gettempdir()) / "researchlens_st.db"
+        return f"sqlite:///{tmp_db.resolve().as_posix()}"
+
+    candidate = _PROJECT_ROOT / "researchlens_st.db"
+    try:
+        test_file = _PROJECT_ROOT / ".perm_check"
+        test_file.touch(exist_ok=True)
+        test_file.unlink(missing_ok=True)
+        return f"sqlite:///{candidate.resolve().as_posix()}"
+    except Exception:
+        tmp_db = Path(tempfile.gettempdir()) / "researchlens_st.db"
+        return f"sqlite:///{tmp_db.resolve().as_posix()}"
+
+os.environ["DATABASE_URL"] = _get_cloud_safe_db_url()
 
 # ── 3. Import Backend Configuration & Database ────────────────────────────────
 from backend.config import settings
@@ -150,17 +176,22 @@ def get_cached_nli_components():
 
 def init_database() -> None:
     """Initialize SQLite tables and recover any stale in_progress jobs."""
-    create_tables()
-    db = SessionLocal()
     try:
-        stale = db.query(ResearchJob).filter(ResearchJob.status == "in_progress").all()
-        for j in stale:
-            j.status = "failed"
-            j.failure_reason = "Application restarted while this job was executing. Please retry."
-        if stale:
-            db.commit()
-    finally:
-        db.close()
+        create_tables()
+        db = SessionLocal()
+        try:
+            stale = db.query(ResearchJob).filter(ResearchJob.status == "in_progress").all()
+            for j in stale:
+                j.status = "failed"
+                j.failure_reason = "Application restarted while this job was executing. Please retry."
+            if stale:
+                db.commit()
+        except Exception as query_exc:
+            logger.warning("Could not query stale jobs on startup: %s", query_exc)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.error("Database initialization failed (running in degraded ephemeral mode): %s", exc)
 
 
 init_database()
