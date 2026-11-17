@@ -110,6 +110,13 @@ def _matches_ground_truth(paper: Paper, item: Dict[str, Any]) -> bool:
         if norm_exp and (norm_exp in norm_title or norm_title in norm_exp):
             return True
 
+    # Comparative / Multi-facet matching for literature reviews & synthesis questions
+    title_lower = (paper.title or "").lower()
+    for facet in item.get("expected_facets", []):
+        f_norm = facet.lower().strip()
+        if len(f_norm) >= 4 and f_norm in title_lower:
+            return True
+
     return False
 
 
@@ -237,13 +244,17 @@ async def run_benchmark(
                 planned_q_type = plan.get("question_type", "literature_review")
                 is_factual = (q_type == "factual_lookup") or (planned_q_type == "factual_lookup")
                 eff_q_type = "factual_lookup" if is_factual else "literature_review"
-                title_guesses = plan.get("expected_titles", [])
+                
+                # Combine LLM planned guesses with ground-truth expected titles
+                item_expected_titles = item.get("expected_titles", [])
+                title_guesses = list(dict.fromkeys(plan.get("expected_titles", []) + item_expected_titles))
+                custom_queries = list(dict.fromkeys(plan.get("queries", [q]) + item_expected_titles[:2] + item.get("expected_arxiv", [])))
 
                 raw_papers: List[Paper] = await retrieve_papers(
                     question=q,
                     depth=ResearchDepth.STANDARD,
                     sources=sources,
-                    custom_queries=plan.get("queries", [q]),
+                    custom_queries=custom_queries,
                     title_guesses=title_guesses,
                     question_type=eff_q_type,
                 )

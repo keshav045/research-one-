@@ -500,17 +500,28 @@ def build_limitations_from_stats(
     return limits
 
 
-def build_references_from_citations(papers: list[Paper], citations: list[Citation]) -> list[Paper]:
-    """Matches every cited [n] to real paper metadata, keeping anchor paper at index 0."""
+def build_references_from_citations(
+    papers: list[Paper],
+    citations: list[Citation],
+    anchor_paper: Optional[Paper] = None,
+) -> list[Paper]:
+    """Matches every cited [n] to real paper metadata, strictly locking anchor paper at index 0 (Reference [1])."""
     paper_map = {p.id: p for p in papers}
+    if anchor_paper and anchor_paper.id not in paper_map:
+        paper_map[anchor_paper.id] = anchor_paper
+
     referenced_ids: list[str] = []
 
-    # Ensure cited papers are prioritized
+    # 1. Foundational anchor paper MUST ALWAYS be reference [1] (index 0) if present
+    if anchor_paper and anchor_paper.id in paper_map:
+        referenced_ids.append(anchor_paper.id)
+
+    # 2. Add remaining cited papers in order of citation appearance
     for c in citations:
         if c.paperId in paper_map and c.paperId not in referenced_ids:
             referenced_ids.append(c.paperId)
 
-    # Add remaining papers up to 12
+    # 3. Add remaining candidate papers up to 12
     for p in papers:
         if p.id not in referenced_ids:
             referenced_ids.append(p.id)
@@ -519,11 +530,15 @@ def build_references_from_citations(papers: list[Paper], citations: list[Citatio
     return ordered[:12]
 
 
-def build_comparison_table(papers: list[Paper], citations: list[Citation]) -> list[ComparisonRow]:
+def build_comparison_table(
+    papers: list[Paper],
+    citations: list[Citation],
+    anchor_paper: Optional[Paper] = None,
+) -> list[ComparisonRow]:
     """Constructs comparison rows only from real metadata, prioritizing cited evidence-bearing papers first."""
     rows: list[ComparisonRow] = []
     seen = set()
-    ordered_papers = build_references_from_citations(papers, citations)
+    ordered_papers = build_references_from_citations(papers, citations, anchor_paper=anchor_paper)
 
     for p in ordered_papers[:6]:
         if not p.title:
@@ -594,11 +609,11 @@ async def synthesize_report(
         elif anchor_paper:
             uncertainty_note = f"Source paper selection is marked uncertain for '{anchor_paper.title}'."
 
-    references = build_references_from_citations(papers, citations)
+    references = build_references_from_citations(papers, citations, anchor_paper=anchor_paper)
     ref_index = {p.id: idx + 1 for idx, p in enumerate(references)}
     for c in citations:
         c.badgeNumber = ref_index.get(c.paperId, 1)
-    comparison_table = build_comparison_table(papers, citations)
+    comparison_table = build_comparison_table(papers, citations, anchor_paper=anchor_paper)
 
     # 1. Generate plain-text claim sentences using reference indices
     raw_claims, writer_provider, writer_model = await generate_plain_answer(

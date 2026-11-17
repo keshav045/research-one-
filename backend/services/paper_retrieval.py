@@ -417,6 +417,8 @@ def _format_arxiv_query_expr(phrase: str) -> str:
         return ""
     if ":" in cleaned:
         return cleaned
+    if re.match(r"^\d{4}\.\d{4,5}(?:v\d+)?$", cleaned):
+        return f"id:{cleaned}"
 
     lower_p = cleaned.lower()
     if "pagedattention" in lower_p:
@@ -549,13 +551,19 @@ async def _fetch_arxiv_query(search_expr: str, max_results: int) -> list[Paper]:
 
     await _throttle_arxiv()
 
-    params = {
-        "search_query": search_expr,
-        "start": 0,
-        "max_results": max_results,
-        "sortBy": "relevance",
-        "sortOrder": "descending",
-    }
+    clean_expr = search_expr.strip()
+    if clean_expr.startswith("id:"):
+        params = {"id_list": clean_expr[3:].strip()}
+    elif re.match(r"^\d{4}\.\d{4,5}(?:v\d+)?$", clean_expr):
+        params = {"id_list": clean_expr}
+    else:
+        params = {
+            "search_query": search_expr,
+            "start": 0,
+            "max_results": max_results,
+            "sortBy": "relevance",
+            "sortOrder": "descending",
+        }
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -1247,17 +1255,17 @@ async def retrieve_candidate_papers(
     async def _run_arxiv_branch() -> None:
         if (ResearchSource.ARXIV in sources or "arXiv" in source_values) and getattr(settings, "ARXIV_ENABLED", True):
             query_exprs: list[str] = []
-            for title in valid_guesses[:1]:
+            for title in valid_guesses[:2]:
                 clean_title = re.sub(r'["\']', '', title).strip()
                 if clean_title:
                     query_exprs.append(f'ti:"{clean_title}"')
-            for q in plan.get("queries", [])[:2]:
+            for q in plan.get("queries", [])[:4]:
                 phrase = re.sub(r'["\']', '', q).strip()
                 if phrase:
                     query_expr = _format_arxiv_query_expr(phrase)
                     if query_expr and query_expr not in query_exprs:
                         query_exprs.append(query_expr)
-            selected_exprs = query_exprs[:2]
+            selected_exprs = query_exprs[:4]
             if selected_exprs:
                 arxiv_tasks = [_fetch_arxiv_query(expr, fetch_limit) for expr in selected_exprs]
                 arxiv_results = await asyncio.gather(*arxiv_tasks, return_exceptions=True)

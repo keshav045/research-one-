@@ -36,7 +36,18 @@ logger = logging.getLogger(__name__)
 PDF_CACHE = Path(settings.PDF_CACHE_DIR)
 PDF_CACHE.mkdir(parents=True, exist_ok=True)
 
-MAX_PDF_SIZE_BYTES = getattr(settings, "MAX_PDF_SIZE_BYTES", 80 * 1024 * 1024)  # 80 MB
+ARXIV_WATERMARK_REGEX = re.compile(
+    r"arXiv:\s*(?:\d{4}\.\d{4,5}|[a-zA-Z\-]+/\d{7})(?:v\d+)?(?:\s*\[[a-zA-Z\.\-]+\])?(?:\s*\d+\s+[A-Za-z]+\s+\d{4})?",
+    re.IGNORECASE,
+)
+
+
+def strip_arxiv_watermarks(text: str) -> str:
+    """Removes arXiv margin stamps such as 'arXiv:2103.14030v2 [cs.CV] 17 Aug 2021'."""
+    if not text:
+        return ""
+    t = ARXIV_WATERMARK_REGEX.sub("", text)
+    return re.sub(r"\s+", " ", t).strip()
 
 
 def _cache_path(url: str) -> Path:
@@ -234,7 +245,9 @@ def _extract_passages_from_pdf_bytes(paper_id: str, pdf_bytes: bytes) -> list[Pa
             prev_was_blank = False
 
             for line in raw_lines:
-                l_str = line.strip()
+                l_str = strip_arxiv_watermarks(line.strip())
+                if not l_str:
+                    continue
 
                 # Drop universal header/footer noise
                 if l_str in bad_headers or l_str in bad_footers:
