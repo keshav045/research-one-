@@ -9,191 +9,261 @@ app_file: streamlit_app.py
 pinned: false
 ---
 
-# 🔬 ResearchLens — Autonomous Academic Research Assistant
+# 🔬 ResearchLens
 
-[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
-[![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688.svg)](https://fastapi.tiangolo.com)
-[![Streamlit](https://img.shields.io/badge/frontend-Streamlit-FF4B4B.svg)](https://streamlit.io)
-[![PyTorch](https://img.shields.io/badge/PyTorch-CUDA%20Enabled-EE4C2C.svg)](https://pytorch.org)
-[![HuggingFace](https://img.shields.io/badge/NLI-DeBERTa--v3-yellow.svg)](https://huggingface.co/MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-
-**ResearchLens** is an autonomous, evidence-grounded academic research platform engineered to eliminate factual hallucination in AI-synthesized scientific reports. By binding every factual claim directly to verbatim source passages from published research papers and auditing them through natural language inference (NLI), ResearchLens guarantees provenance, accuracy, and citation integrity.
+An open-source academic research assistant that actually reads the papers, verifies claims against real PDF text, and produces properly cited research reports without hallucinating.
 
 ---
 
-## 🌟 Key Features
+## The Problem with LLMs in Academic Research
 
-- **Pre-Flight Research Scope & Security Gating:** Enforces a strict 10–500 character limit, rejects prompt injections, casual greetings, creative writing, and unstructured narrative text blocks with actionable user guidance.
-- **Concurrent Multi-Source Retrieval:** Queries **arXiv**, **Semantic Scholar**, and **OpenAlex** simultaneously with exponential backoff and rate-limit recovery.
-- **Canonical Multi-Provider Deduplication:** Deterministic merging prioritizing $\text{DOI} \succ \text{arXiv} \succ \text{Semantic Scholar} \succ \text{OpenAlex} \succ \text{Title}$, preserving peak citation counts and full-text URLs.
-- **Robust PDF Extraction:** Magic-byte validation (`%PDF-`), arXiv margin stamp cleaning, and automatic header/footer/bibliography removal.
-- **Paper-Scoped Vector Search:** Passage retrieval is strictly bounded to the candidate paper being analyzed, preventing cross-paper vector contamination.
-- **Two-Tier Claim Verification:**
-  - *Tier 1:* Verbatim source-passage token matching and exact page tracking.
-  - *Tier 2:* Natural Language Inference (NLI) sentence audit using `DeBERTa-v3-base` cross-encoders.
-- **Anchor Reference Locking:** Guarantees foundational anchor papers are anchored at Reference `[1]`, preventing later comparative works from misrepresenting core contributions.
-- **Cloud & Filesystem Resilience:** Automatic writable `/tmp` fallback for SQLite databases and PDF caches on Streamlit Community Cloud and read-only filesystems.
-- **Multi-LLM Flexibility:** Supports OpenAI (`gpt-4o-mini`, `gpt-4o`), Google Gemini (`gemini-2.0-flash`), Qwen, and local Hugging Face / Ollama models.
+If you have ever asked ChatGPT, Claude, or any standard chatbot a research question like:
+> *"Which paper introduced the Transformer architecture, and what was its BLEU score on WMT'14?"*
+
+You've probably noticed that LLMs frequently:
+- Cite papers that do not exist or invent non-existent DOIs.
+- Attribute a technique to the wrong authors or the wrong year.
+- Mix up numbers, benchmark results, and baseline models.
+- Hallucinate citations (assigning `[1]` to a paper that was never mentioned).
+
+**ResearchLens solves this.** Instead of asking a model to answer from memory, it searches real scholarly databases, downloads the actual PDFs, extracts the text, verifies every assertion using a Natural Language Inference (NLI) model, and generates an evidence-grounded summary where every single claim links back to a verified sentence in a real paper.
 
 ---
 
-## 🏗️ Architecture & Pipeline
+## How It Works (Under the Hood)
 
-```mermaid
-flowchart TD
-    UserQuery["User Research Query"] --> ScopeGating["Pre-Flight Scope & Security\n(10-500 chars, narrative block check, research framing)"]
-    ScopeGating -- Blocked --> Feedback["Error Notice: 'Please ask a specific research question'"]
-    ScopeGating -- Passed --> QueryPlanner["Query Planner & Classifier\n(Factual Lookup vs Literature Review)"]
-    
-    QueryPlanner --> Retrieval["Multi-Source Concurrent Retrieval\n(arXiv, Semantic Scholar, OpenAlex)"]
-    Retrieval --> Deduplication["Canonical Priority Deduplication\n(DOI -> arXiv -> S2 -> OpenAlex -> Title)"]
-    Deduplication --> Ranker["CrossEncoder Reranker & Relevance Filter\n(Anti-Starvation Backfill + Score Gating)"]
-    
-    Ranker --> PDFEngine["PDF Ingestion & Text Engine\n(Magic Bytes, arXiv Watermark Stripping, Chunking)"]
-    PDFEngine --> VectorStore["Paper-Scoped Vector Store\n(BAAI/bge-small-en-v1.5)"]
-    VectorStore --> NLI["NLI Entailment Verifier\n(DeBERTa-v3-base-mnli-fever-anli)"]
-    
-    NLI --> Synthesis["Report Synthesizer & Citation Auditor\n(Anchor [1] Lock, Comparison Matrix, Badge Boundaries)"]
-    Synthesis --> Presentation["Streamlit UI & REST API Report\n(Citation Integrity %, Coverage %, Transparent Matrices)"]
+Here is what happens when you enter a research question:
+
+```
+[ Your Research Question ]
+           │
+           ▼
+1. Pre-Flight Check & Query Planner
+   - Rejects non-research queries (e.g. casual chat, code snippets, random text pastes)
+   - Checks length (10 to 500 characters)
+   - Classifies query (Factual Lookup vs. Comparative Review)
+   - Generates targeted search phrases
+           │
+           ▼
+2. Multi-Source Retrieval
+   - Searches arXiv, Semantic Scholar, and OpenAlex concurrently
+   - Merges duplicates using DOI, arXiv ID, and title matching
+   - Preserves citation counts and open-access PDF links
+           │
+           ▼
+3. Relevance Filtering & Reranking
+   - Uses cross-encoder rerankers (MS-MARCO MiniLM) to score candidates
+   - Disqualifies off-topic papers (even if they have 50,000+ citations)
+   - Selects the top relevant papers for full-text analysis
+           │
+           ▼
+4. PDF Fetching & Cleanup
+   - Validates PDF magic bytes (%PDF-) to ignore broken HTML redirects
+   - Strips running headers, footers, and arXiv margin stamps (e.g. "arXiv:2103.14030v2")
+   - Chunks text into clean, windowed technical passages
+           │
+           ▼
+5. Paper-Scoped Vector Search
+   - Embeds passages using BAAI/bge-small-en-v1.5
+   - Scopes vector search strictly within each paper (zero cross-paper pollution)
+           │
+           ▼
+6. Two-Tier Claim Verification
+   - Tier 1: Checks for verbatim matching sentences in the source text
+   - Tier 2: Runs DeBERTa-v3 NLI to verify that the passage strictly entails the claim
+   - Discards any claim that doesn't meet the entailment threshold (≥ 0.80)
+           │
+           ▼
+7. Report Synthesis & Citation Locking
+   - Locks the primary foundational paper at Reference [1]
+   - Audits all [n] badges to make sure they match the reference list
+   - Builds a side-by-side comparison matrix and computes citation integrity scores
+           │
+           ▼
+[ Final Verified Academic Report ]
 ```
 
 ---
 
-## 📁 Repository Structure
+## Key Features
 
-```text
-├── streamlit_app.py                   # Streamlit interactive UI application
-├── run_local.py                       # One-click dual-server launcher (FastAPI + Streamlit)
-├── run_local.bat                      # Windows launcher batch script
-├── requirements.txt                   # Complete unified dependencies
-├── requirements-streamlit.txt         # Streamlit Cloud deployment dependencies
-├── backend/
-│   ├── main.py                        # FastAPI entry point & lifecycle manager
-│   ├── config.py                      # Global settings, model paths & thresholds
-│   ├── security.py                    # Pre-flight query validation & scope gating
-│   ├── models/
-│   │   ├── database.py                # SQLAlchemy SQLite models & cloud /tmp fallback
-│   │   └── schemas.py                 # Pydantic data models & request/response schemas
-│   ├── routers/
-│   │   └── research.py                # REST API routes (/api/research)
-│   ├── services/
-│   │   ├── paper_search_manager.py    # Search orchestration manager
-│   │   ├── paper_retrieval.py         # Multi-source API clients (arXiv, S2, OpenAlex)
-│   │   ├── pdf_extractor.py           # PyMuPDF parser & watermark cleaner
-│   │   ├── ranker.py                  # Deduplication & neural cross-encoder reranking
-│   │   ├── vector_store.py            # Paper-scoped embedding vector store
-│   │   ├── evidence.py                # Passage extraction & verbatim match engine
-│   │   ├── nli_verifier.py            # DeBERTa-v3 entailment verification engine
-│   │   ├── local_llm_service.py       # Report synthesis & citation reference auditor
-│   │   └── query_planner.py           # Question intent & sub-query generation
-│   └── tests/                         # Comprehensive pytest test suite
-└── evaluation/
-    ├── benchmark.py                   # Ground-truth evaluation runner
-    ├── harness.py                     # Evaluation test lifecycle harness
-    ├── metrics.py                     # Formal retrieval, evidence & citation metrics
-    ├── run_suite.py                   # 13-module master evaluation suite
-    └── dataset.json                   # Ground-truth academic benchmark questions
-```
+- **No Hallucinated Citations:** If a paper wasn't downloaded and verified, it doesn't get cited. Period.
+- **Smart Anchor Paper Locking:** The main paper answering your question is locked as Reference `[1]`. Secondary or follow-up papers never hijack the primary reference spot.
+- **Pre-Flight Query Guard:** Blocks spam, creative writing requests, and accidental paragraph pastes with friendly, clear guidance.
+- **Multi-Source Coverage:** Gathers literature from arXiv, Semantic Scholar, and OpenAlex in parallel with automated exponential backoff on rate limits.
+- **Full Text Provenance:** Tracks the exact page number and verbatim highlight sentence for every single verified claim.
+- **Comparison Tables:** Automatically generates comparison matrices covering architecture, datasets, metrics, and key innovations.
+- **Flexible LLMs:** Works out of the box with OpenAI (`gpt-4o-mini`, `gpt-4o`), Google Gemini (`gemini-2.0-flash`), Qwen, or local Hugging Face / Ollama models.
+- **Cloud-Ready:** Automatically detects read-only environments (like Streamlit Community Cloud) and uses `/tmp` for SQLite and PDF caching with zero crashes.
 
 ---
 
-## 🚀 Quickstart & Setup
+## Quick Start (Get Running in 3 Minutes)
 
-### Prerequisites
-- Python 3.11+
-- CUDA-compatible GPU (recommended for local embeddings/NLI; CPU fallback fully supported)
+### 1. Prerequisites
+- Python 3.11 or newer installed.
+- (Optional) NVIDIA GPU with CUDA if you want fast local embeddings and NLI. If no GPU is available, it automatically falls back to CPU.
 
-### 1. Installation
-Clone the repository and install dependencies:
+### 2. Clone and Setup Environment
+
 ```bash
+# Clone the repository
 git clone https://github.com/keshav045/research-one-.git
 cd research-one-
 
-# Create virtual environment
+# Create a virtual environment
 python -m venv venv
-# Windows:
+
+# Activate the virtual environment
+# On Windows:
 venv\Scripts\activate
-# Linux/macOS:
+# On macOS / Linux:
 source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Environment Configuration
-Create a `.env` file in the root or `backend/` directory:
+### 3. Create your `.env` File
+Create a `.env` file in the project root:
+
 ```ini
-# LLM Provider Configuration (openai | gemini | local)
+# LLM Provider: openai | gemini | local
 LLM_PROVIDER=openai
-OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_API_KEY=sk-proj-your-openai-api-key-here
 OPENAI_MODEL=gpt-4o-mini
 
-# Optional Cloud LLMs
+# Optional: Google Gemini (if using LLM_PROVIDER=gemini)
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-2.0-flash
 
-# Scholarly API Keys (Optional but recommended for high throughput)
+# Optional: Academic API keys (improves rate limits)
 SEMANTIC_SCHOLAR_API_KEY=
 OPENALEX_API_KEY=
-OPENALEX_EMAIL=your_email@example.com
+OPENALEX_EMAIL=your_email@domain.com
 
-# Model Configurations
+# Models (defaults are fast and highly accurate)
 EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
 RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
 NLI_MODEL=MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli
 NLI_DEVICE=cuda
 NLI_ENTAIL_THRESHOLD=0.80
 
-# Database & Storage
+# Storage & Servers
 DATABASE_URL=sqlite:///./researchlens.db
 PDF_CACHE_DIR=./pdf_cache
-MAX_PDF_WORKERS=4
+HOST=127.0.0.1
+PORT=8000
 ```
 
-For **Streamlit Community Cloud**, paste these variables into **App settings > Secrets** (`.streamlit/secrets.toml`).
+> **Tip:** If you are running on CPU without a GPU, simply change `NLI_DEVICE=cuda` to `NLI_DEVICE=cpu`.
 
----
+### 4. Run the Project
 
-### 3. Launching ResearchLens
+You can run both the FastAPI backend and the Streamlit frontend with a single command:
 
-#### One-Click Dual Launcher (Recommended)
-Launches both the FastAPI backend (port 8000) and the Streamlit UI (port 8501) concurrently:
 ```bash
+# Launch both backend (port 8000) and frontend (port 8501)
 python run_local.py
 ```
 
-#### Running Services Separately
-**Terminal 1 — FastAPI Backend:**
-```bash
-uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+Or on Windows, double-click:
+```bat
+run_local.bat
 ```
-- API Health Check: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
-- Swagger API Docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 
-**Terminal 2 — Streamlit Interface:**
-```bash
-streamlit run streamlit_app.py --server.port 8501
-```
-- Web Application: [http://localhost:8501](http://localhost:8501)
+Once running, open your browser:
+- **Streamlit Web App:** [http://localhost:8501](http://localhost:8501)
+- **FastAPI Backend:** [http://127.0.0.1:8000](http://127.0.0.1:8000)
+- **Interactive Swagger Docs:** [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- **Health Check:** [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
 
 ---
 
-## 🧪 Testing & Evaluation
+## Deploying to Streamlit Cloud
 
-### Unit & Integration Tests
-Execute the automated pytest suite:
-```bash
-pytest backend/tests -v
+If you want to host ResearchLens for free on Streamlit Community Cloud:
+
+1. Fork or push this repository to your GitHub account.
+2. Go to [share.streamlit.io](https://share.streamlit.io/) and create a new app pointing to `streamlit_app.py`.
+3. In **App settings > Secrets**, paste your configuration (matches the `.env` format):
+
+```toml
+LLM_PROVIDER = "openai"
+OPENAI_API_KEY = "sk-proj-your-openai-api-key-here"
+OPENAI_MODEL = "gpt-4o-mini"
+
+# Optional academic keys
+SEMANTIC_SCHOLAR_API_KEY = ""
+OPENALEX_API_KEY = ""
+OPENALEX_EMAIL = "your_email@domain.com"
+
+# Models
+EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+NLI_MODEL = "cross-encoder/nli-deberta-v3-small"
+NLI_DEVICE = "cpu"
+SKIP_MODEL_WARMUP = "true"
+MAX_PDF_WORKERS = "4"
 ```
 
-### Retrieval & Synthesis Benchmark
-Run the academic evaluation benchmark against ground-truth datasets:
+> **Note on Filesystems:** Streamlit Cloud has a read-only source directory. ResearchLens automatically detects this and stores SQLite databases in `/tmp/researchlens_st.db`, ensuring zero disk-permission errors.
+
+---
+
+## Project Structure
+
+```text
+research-one/
+├── streamlit_app.py              # Main Streamlit user interface
+├── run_local.py                  # One-click script launching backend & UI
+├── run_local.bat                 # Windows one-click batch launcher
+├── requirements.txt              # All dependencies (FastAPI, PyTorch, PyMuPDF, etc.)
+├── requirements-streamlit.txt    # Streamlit Cloud deployment package list
+│
+├── backend/
+│   ├── main.py                   # FastAPI app entry point & lifespan events
+│   ├── config.py                 # Pydantic Settings & environment variables
+│   ├── security.py               # Pre-flight query validation & narrative filters
+│   ├── models/
+│   │   ├── database.py           # SQLAlchemy SQLite setup & cloud /tmp fallback
+│   │   └── schemas.py            # Pydantic schemas (Paper, Citation, Report)
+│   ├── routers/
+│   │   └── research.py           # REST endpoints (/api/research/*)
+│   ├── services/
+│   │   ├── paper_search_manager.py # Orchestrates parallel retrieval across sources
+│   │   ├── paper_retrieval.py      # arXiv, Semantic Scholar & OpenAlex API clients
+│   │   ├── pdf_extractor.py        # PyMuPDF engine, magic bytes & watermark removal
+│   │   ├── ranker.py               # Canonical deduplication & MS-MARCO reranking
+│   │   ├── vector_store.py         # Paper-scoped embedding indices (BGE-small)
+│   │   ├── evidence.py             # Verbatim sentence extraction & claim matching
+│   │   ├── nli_verifier.py         # DeBERTa-v3 Natural Language Inference audit
+│   │   ├── local_llm_service.py    # Report synthesis, citation badge verification
+│   │   └── query_planner.py        # Question intent classifier & sub-query builder
+│   └── tests/                    # Pytest test suite
+│
+└── evaluation/
+    ├── benchmark.py              # Ground-truth evaluation runner
+    ├── harness.py                # Dataset loader and test lifecycle harness
+    ├── metrics.py                # Recall@k, MRR, NDCG@10, and Citation Precision
+    ├── run_suite.py              # 13-module master evaluation suite
+    └── dataset.json              # Curated academic research benchmark questions
+```
+
+---
+
+## Running Tests & Benchmarks
+
+ResearchLens includes a full test suite to guarantee citation boundaries, deduplication, and query safety:
+
 ```bash
-# Evaluate on top benchmark questions
+# Run unit and integration tests
+pytest backend/tests -v
+
+# Run the evaluation benchmark on 5 sample queries
 python -m evaluation.benchmark --max 5
 
-# Evaluate by difficulty tier
+# Run benchmark filtered by difficulty tier
 python -m evaluation.benchmark --difficulty easy --max 3
 python -m evaluation.benchmark --difficulty medium --max 3
 python -m evaluation.benchmark --difficulty hard --max 3
@@ -201,21 +271,19 @@ python -m evaluation.benchmark --difficulty hard --max 3
 
 ---
 
-## 📊 Benchmark Scorecard
+## Frequently Asked Questions (FAQ)
 
-| Metric Category | Metric Name | Measured Result | Production Target | Gate Status |
-| :--- | :--- | :--- | :--- | :--- |
-| **Retrieval** | Top-1 Precision (Hit@1) | **100.0%** | $\ge 85.0\%$ | **PASS** |
-| **Retrieval** | Top-5 Recall (Recall@5) | **100.0%** | $\ge 90.0\%$ | **PASS** |
-| **Retrieval** | Mean Reciprocal Rank (MRR) | **0.849** | $\ge 0.70$ | **PASS** |
-| **Evidence** | Evidence Precision | **100.0%** | $\ge 90.0\%$ | **PASS** |
-| **Citations** | Citation Precision | **100.0%** | $= 100.0\%$ | **PASS** |
-| **Factuality** | Unsupported Claim Rate | **0.0%** | $\le 5.0\%$ | **PASS** |
-| **Infrastructure** | PDF Extraction Success | **100.0%** | $\ge 80.0\%$ | **PASS** |
-| **Security** | Pre-Flight Scope Precision | **100.0%** | $\ge 95.0\%$ | **PASS** |
+#### 1. What happens if Semantic Scholar hits a rate limit?
+Semantic Scholar has strict rate limits for free tiers. ResearchLens catches HTTP 429 errors automatically, applies exponential backoff, and ensures arXiv and OpenAlex results are still returned without failing your research request.
+
+#### 2. Can I run this completely offline or locally?
+Yes! Set `LLM_PROVIDER=local` in `.env` and set `NLI_DEVICE=cpu`. The embedding model, reranker, and NLI model will all run locally on your machine via Hugging Face Transformers.
+
+#### 3. Why was my question rejected?
+ResearchLens enforces research-focused queries between 10 and 500 characters. If you paste a random story or ask a generic question like *"write a poem"* or *"tell me a joke"*, the pre-flight guard will politely prompt you to ask an academic or scientific research question.
 
 ---
 
-## 📄 License
+## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is open-source under the [MIT License](LICENSE). Contributions, bug reports, and pull requests are warmly welcome!
