@@ -81,6 +81,7 @@ ResearchLens orchestrates its multi-stage academic pipeline as an explicit, stat
 - **Multi-Source Coverage:** Gathers literature from arXiv, Semantic Scholar, and OpenAlex in parallel with automated exponential backoff on rate limits.
 - **Full Text Provenance:** Tracks the exact page number and verbatim highlight sentence for every single verified claim.
 - **Comparison Tables:** Automatically generates comparison matrices covering architecture, datasets, metrics, and key innovations.
+- **LangSmith Tracing & Observability:** Live distributed tracing for every LangGraph node, query rewrite iteration, NLI verification verdict, and latency profile directly on [smith.langchain.com](https://smith.langchain.com).
 - **Flexible LLMs:** Works out of the box with OpenAI (`gpt-4o-mini`, `gpt-4o`), Google Gemini (`gemini-2.0-flash`), Qwen, or local Hugging Face / Ollama models.
 - **Cloud-Ready:** Automatically detects read-only environments (like Streamlit Community Cloud) and uses `/tmp` for SQLite and PDF caching with zero crashes.
 
@@ -136,6 +137,11 @@ RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
 NLI_MODEL=MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli
 NLI_DEVICE=cuda
 NLI_ENTAIL_THRESHOLD=0.80
+
+# LangSmith Tracing & Observability
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=your_langsmith_api_key
+LANGSMITH_PROJECT=researchlens
 
 # Storage & Servers
 DATABASE_URL=sqlite:///./researchlens.db
@@ -193,6 +199,11 @@ NLI_MODEL = "cross-encoder/nli-deberta-v3-small"
 NLI_DEVICE = "cpu"
 SKIP_MODEL_WARMUP = "true"
 MAX_PDF_WORKERS = "4"
+
+# LangSmith Observability Tracing
+LANGSMITH_TRACING = "true"
+LANGSMITH_API_KEY = "your_langsmith_api_key"
+LANGSMITH_PROJECT = "researchlens"
 ```
 
 > **Note on Filesystems:** Streamlit Cloud has a read-only source directory. ResearchLens automatically detects this and stores SQLite databases in `/tmp/researchlens_st.db`, ensuring zero disk-permission errors.

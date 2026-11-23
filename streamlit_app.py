@@ -65,6 +65,21 @@ try:
 except Exception as e:
     logger.debug("st.secrets unavailable or empty: %s", e)
 
+# ── Map LangSmith & LangChain Tracing Secrets ────────────────────────────────
+_ls_key = os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
+if _ls_key:
+    os.environ["LANGSMITH_API_KEY"] = _ls_key
+    os.environ["LANGCHAIN_API_KEY"] = _ls_key
+
+_ls_tracing = os.getenv("LANGSMITH_TRACING") or os.getenv("LANGCHAIN_TRACING_V2")
+if _ls_tracing:
+    os.environ["LANGSMITH_TRACING"] = _ls_tracing
+    os.environ["LANGCHAIN_TRACING_V2"] = _ls_tracing
+
+_ls_proj = os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT") or "researchlens"
+os.environ["LANGSMITH_PROJECT"] = _ls_proj
+os.environ["LANGCHAIN_PROJECT"] = _ls_proj
+
 # ── 2. Memory & Resource-Conscious Streamlit Cloud Defaults ───────────────────
 # Community Cloud provides ~2 CPU cores and ~2.7 GB RAM. We configure:
 # - CPU device for PyTorch and NLI
@@ -610,6 +625,20 @@ with st.sidebar:
     st.markdown(f"**Embedding:** `{emb_display}`")
     st.markdown(f"**Inference Device:** `{settings.NLI_DEVICE.upper()}`")
     st.markdown("**Orchestration:** `LangGraph State Machine (Self-Correcting Loop)`")
+
+    is_ls_active = bool(os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")) and (
+        os.getenv("LANGSMITH_TRACING", "").lower() in ("true", "1")
+        or os.getenv("LANGCHAIN_TRACING_V2", "").lower() in ("true", "1")
+    )
+    if is_ls_active:
+        ls_p = os.getenv("LANGSMITH_PROJECT", "researchlens")
+        st.markdown(
+            f"**LangSmith Tracing:** `Enabled` ([Dashboard ↗](https://smith.langchain.com))<br>"
+            f"<span style='font-size:0.78rem;color:#94A3B8;'>Project: <code>{ls_p}</code></span>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown("**LangSmith Tracing:** `Disabled`")
 
     # Memory Usage Telemetry
     mem_mb = get_current_memory_mb()

@@ -32,6 +32,21 @@ def _load_env_files() -> None:
             except Exception:
                 pass
 
+    # Synchronize LangSmith <-> LangChain environment variables
+    ls_api_key = os.environ.get("LANGSMITH_API_KEY") or os.environ.get("LANGCHAIN_API_KEY")
+    if ls_api_key:
+        os.environ["LANGSMITH_API_KEY"] = ls_api_key
+        os.environ["LANGCHAIN_API_KEY"] = ls_api_key
+
+    ls_tracing = os.environ.get("LANGSMITH_TRACING") or os.environ.get("LANGCHAIN_TRACING_V2")
+    if ls_tracing:
+        os.environ["LANGSMITH_TRACING"] = ls_tracing
+        os.environ["LANGCHAIN_TRACING_V2"] = ls_tracing
+
+    ls_project = os.environ.get("LANGSMITH_PROJECT") or os.environ.get("LANGCHAIN_PROJECT") or "researchlens"
+    os.environ["LANGSMITH_PROJECT"] = ls_project
+    os.environ["LANGCHAIN_PROJECT"] = ls_project
+
 
 _load_env_files()
 
@@ -174,6 +189,12 @@ class Settings(BaseSettings):
     USE_LANGGRAPH: bool = True
     LANGGRAPH_MAX_RETRIES: int = 2
 
+    # LangSmith Observability & Tracing
+    LANGSMITH_TRACING: bool = True
+    LANGSMITH_API_KEY: str = ""
+    LANGSMITH_PROJECT: str = "researchlens"
+    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
+
     @property
     def is_openai_configured(self) -> bool:
         return bool(self.OPENAI_API_KEY) and self.OPENAI_API_KEY.strip() not in ("your_openai_api_key_here", "xxx", "")
@@ -212,6 +233,11 @@ class Settings(BaseSettings):
             or self.is_gemini_configured
             or self.is_qwen_configured
         )
+
+    @property
+    def is_langsmith_configured(self) -> bool:
+        """True if LangSmith tracing is enabled with a valid API key."""
+        return bool(self.LANGSMITH_API_KEY and self.LANGSMITH_API_KEY.strip()) and self.LANGSMITH_TRACING
 
 
 @lru_cache

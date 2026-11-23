@@ -64,6 +64,14 @@ from .paper_retrieval import (
 from .text_utils import split_into_sentences
 from .vector_store import VectorStore
 
+try:
+    from langsmith import traceable
+except ImportError:
+    def traceable(fn=None, **kwargs):
+        if fn is not None:
+            return fn
+        return lambda f: f
+
 logger = logging.getLogger(__name__)
 
 # ─── Configuration Constants ──────────────────────────────────────────────────
@@ -129,6 +137,7 @@ class ResearchState(TypedDict, total=False):
 
 # ─── Helper: Query Rewriter ───────────────────────────────────────────────────
 
+@traceable(name="researchlens_rewrite_queries", run_type="llm")
 async def rewrite_search_queries(
     question: str,
     previous_queries: List[str],
@@ -192,6 +201,7 @@ async def rewrite_search_queries(
 
 # ─── Graph Node Definitions ───────────────────────────────────────────────────
 
+@traceable(name="researchlens_preflight", run_type="parser")
 def preflight_node(state: ResearchState) -> Dict[str, Any]:
     """
     Node 1: Pre-flight Security & Query Guard.
@@ -223,6 +233,7 @@ def preflight_node(state: ResearchState) -> Dict[str, Any]:
     }
 
 
+@traceable(name="researchlens_plan_query", run_type="chain")
 async def plan_query_node(state: ResearchState) -> Dict[str, Any]:
     """
     Node 2: Query Planning & Intent Classification.
@@ -269,6 +280,7 @@ async def plan_query_node(state: ResearchState) -> Dict[str, Any]:
     }
 
 
+@traceable(name="researchlens_retrieve", run_type="retriever")
 async def retrieve_node(state: ResearchState) -> Dict[str, Any]:
     """
     Node 3: Multi-Source Literature Retrieval.
@@ -338,6 +350,7 @@ async def retrieve_node(state: ResearchState) -> Dict[str, Any]:
     }
 
 
+@traceable(name="researchlens_rerank_fetch", run_type="chain")
 async def rerank_fetch_node(state: ResearchState) -> Dict[str, Any]:
     """
     Node 4: Deduplication, MS-MARCO Reranking, PDF Extraction & Vector Indexing.
@@ -449,6 +462,7 @@ async def rerank_fetch_node(state: ResearchState) -> Dict[str, Any]:
     }
 
 
+@traceable(name="researchlens_verify_claims", run_type="llm")
 async def verify_claims_node(state: ResearchState) -> Dict[str, Any]:
     """
     Node 5: Two-Tier Evidence Extraction & NLI Corroboration.
@@ -509,6 +523,7 @@ async def verify_claims_node(state: ResearchState) -> Dict[str, Any]:
     }
 
 
+@traceable(name="researchlens_rewrite_query", run_type="llm")
 async def rewrite_query_node(state: ResearchState) -> Dict[str, Any]:
     """
     Node 6: Self-Correction Retrieval Rewriter (The Retry Loop).
@@ -568,6 +583,7 @@ async def rewrite_query_node(state: ResearchState) -> Dict[str, Any]:
     }
 
 
+@traceable(name="researchlens_write_report", run_type="chain")
 async def write_report_node(state: ResearchState) -> Dict[str, Any]:
     """
     Node 7: Academic Synthesis & Citation Integrity Audit.

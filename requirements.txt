@@ -22,3 +22,4 @@ tenacity>=8.2.0
 psutil>=5.9.0
 langgraph>=1.2.0
 langchain-core>=0.3.0
+langsmith>=0.1.0
