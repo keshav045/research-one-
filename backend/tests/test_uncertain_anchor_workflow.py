@@ -84,12 +84,16 @@ async def test_workflow_uncertain_anchor_reaches_final_status(monkeypatch):
         "sub_questions": ["What is Attention Is All You Need?"],
     })
     monkeypatch.setattr("backend.services.research_workflow.plan_queries", plan_mock)
+    monkeypatch.setattr("backend.services.research_graph.plan_queries", plan_mock)
 
     # 2. Mock candidate retrieval
     retrieve_mock = AsyncMock(return_value=[p1, p2])
     monkeypatch.setattr("backend.services.research_workflow.retrieve_papers", retrieve_mock)
+    monkeypatch.setattr("backend.services.research_graph.retrieve_papers", retrieve_mock)
     monkeypatch.setattr("backend.services.research_workflow.enrich_papers_with_s2", AsyncMock(return_value=[p1, p2]))
+    monkeypatch.setattr("backend.services.research_graph.enrich_papers_with_s2", AsyncMock(return_value=[p1, p2]))
     monkeypatch.setattr("backend.services.research_workflow.enrich_papers_with_openalex", AsyncMock(return_value=[p1, p2]))
+    monkeypatch.setattr("backend.services.research_graph.enrich_papers_with_openalex", AsyncMock(return_value=[p1, p2]))
 
     # 3. Mock anchor selection with uncertain ensemble divergence
     anchor_debug_dict = {
@@ -106,15 +110,24 @@ async def test_workflow_uncertain_anchor_reaches_final_status(monkeypatch):
         "backend.services.research_workflow.select_anchor_paper",
         AsyncMock(return_value=(p1, [p1, p2], anchor_debug_dict)),
     )
+    monkeypatch.setattr(
+        "backend.services.research_graph.select_anchor_paper",
+        AsyncMock(return_value=(p1, [p1, p2], anchor_debug_dict)),
+    )
 
     # 4. Mock PDF extraction
     monkeypatch.setattr(
         "backend.services.research_workflow.extract_papers_batch",
         AsyncMock(return_value=[p1, p2]),
     )
+    monkeypatch.setattr(
+        "backend.services.research_graph.extract_papers_batch",
+        AsyncMock(return_value=[p1, p2]),
+    )
 
     # 5. Mock VectorStore build
     monkeypatch.setattr("backend.services.research_workflow.VectorStore.build", MagicMock())
+    monkeypatch.setattr("backend.services.research_graph.VectorStore.build", MagicMock())
 
     # 6. Mock evidence extraction & verification
     mock_citation = Citation(
@@ -139,6 +152,10 @@ async def test_workflow_uncertain_anchor_reaches_final_status(monkeypatch):
         "backend.services.research_workflow.extract_and_verify_evidence",
         MagicMock(return_value=([mock_claim], [mock_citation], [], {})),
     )
+    monkeypatch.setattr(
+        "backend.services.research_graph.extract_and_verify_evidence",
+        MagicMock(return_value=([mock_claim], [mock_citation], [], {})),
+    )
 
     # 7. Mock report synthesis
     dummy_report = ResearchReport(
@@ -161,6 +178,10 @@ async def test_workflow_uncertain_anchor_reaches_final_status(monkeypatch):
     )
     monkeypatch.setattr(
         "backend.services.research_workflow.synthesize_report",
+        AsyncMock(return_value=(dummy_report, 1.0, [])),
+    )
+    monkeypatch.setattr(
+        "backend.services.research_graph.synthesize_report",
         AsyncMock(return_value=(dummy_report, 1.0, [])),
     )
 

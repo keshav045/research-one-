@@ -80,6 +80,42 @@ MIN_VERIFIED_REVIEW: int = 2
 MAX_RETRIES: int = 2
 
 
+def _normalize_depth(raw: Any) -> ResearchDepth:
+    """Safely coerce any raw string or enum value into a valid ResearchDepth."""
+    if isinstance(raw, ResearchDepth):
+        return raw
+    val = str(raw or "Standard").strip().capitalize()
+    if val == "Deep":
+        return ResearchDepth.DEEP
+    if val == "Quick":
+        return ResearchDepth.QUICK
+    return ResearchDepth.STANDARD
+
+
+def _normalize_sources(raw: Any) -> List[ResearchSource]:
+    """Safely coerce raw sources into valid ResearchSource enum instances."""
+    if not raw:
+        return [ResearchSource.ARXIV, ResearchSource.SEMANTIC_SCHOLAR, ResearchSource.OPENALEX]
+    sources: List[ResearchSource] = []
+    for s in raw:
+        if isinstance(s, ResearchSource):
+            sources.append(s)
+        else:
+            s_low = str(s).lower()
+            if "arxiv" in s_low:
+                sources.append(ResearchSource.ARXIV)
+            elif "semantic" in s_low or "s2" in s_low:
+                sources.append(ResearchSource.SEMANTIC_SCHOLAR)
+            elif "openalex" in s_low:
+                sources.append(ResearchSource.OPENALEX)
+            else:
+                try:
+                    sources.append(ResearchSource(s))
+                except ValueError:
+                    sources.append(ResearchSource.ARXIV)
+    return sources or [ResearchSource.ARXIV, ResearchSource.SEMANTIC_SCHOLAR, ResearchSource.OPENALEX]
+
+
 # ─── State Definition ─────────────────────────────────────────────────────────
 
 class ResearchState(TypedDict, total=False):
@@ -291,8 +327,8 @@ async def retrieve_node(state: ResearchState) -> Dict[str, Any]:
     sub_queries = state.get("sub_queries", [question])
     expected_titles = state.get("expected_titles", [])
     intent = state.get("intent", "literature_review")
-    depth = ResearchDepth(state.get("depth", "normal"))
-    sources = [ResearchSource(s) for s in state.get("sources", ["arxiv", "semantic_scholar", "openalex"])]
+    depth = _normalize_depth(state.get("depth"))
+    sources = _normalize_sources(state.get("sources"))
 
     retry_count = state.get("retries", 0)
     logger.info(
@@ -360,7 +396,7 @@ async def rerank_fetch_node(state: ResearchState) -> Dict[str, Any]:
     papers = state.get("papers", [])
     intent = state.get("intent", "literature_review")
     expected_titles = state.get("expected_titles", [])
-    depth = ResearchDepth(state.get("depth", "normal"))
+    depth = _normalize_depth(state.get("depth"))
 
     t0 = time.time()
     logger.info("[LangGraph:RerankFetch] Deduplicating and ranking %d candidate papers...", len(papers))
@@ -449,8 +485,21 @@ async def rerank_fetch_node(state: ResearchState) -> Dict[str, Any]:
         "error": None,
     })
 
+    # Flatten passages for state consumers and verification
+    passages: List[Dict[str, Any]] = []
+    for p in enriched_papers:
+        for pass_obj in (p.passages or []):
+            if hasattr(pass_obj, "model_dump"):
+                passages.append(pass_obj.model_dump())
+            elif isinstance(pass_obj, dict):
+                passages.append(pass_obj)
+            else:
+                passages.append(dict(pass_obj))
+
     return {
+        "papers": enriched_papers,
         "ranked_papers": enriched_papers,
+        "passages": passages,
         "anchor_paper": anchor_paper,
         "alternate_paper": alternate_paper,
         "anchor_debug": anchor_debug,
@@ -590,7 +639,7 @@ async def write_report_node(state: ResearchState) -> Dict[str, Any]:
     Locks anchor citation at [1], builds comparison matrix, audits NLI sentence support.
     """
     question = state["question"]
-    depth = ResearchDepth(state.get("depth", "normal"))
+    depth = _normalize_depth(state.get("depth"))
     ranked_papers = state.get("ranked_papers", [])
     claims = state.get("claims", [])
     citations = state.get("citations", [])
