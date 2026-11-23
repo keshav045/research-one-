@@ -609,6 +609,7 @@ with st.sidebar:
     st.markdown(f"**NLI Model:** `{settings.NLI_MODEL.split('/')[-1]}`")
     st.markdown(f"**Embedding:** `{emb_display}`")
     st.markdown(f"**Inference Device:** `{settings.NLI_DEVICE.upper()}`")
+    st.markdown("**Orchestration:** `LangGraph State Machine (Self-Correcting Loop)`")
 
     # Memory Usage Telemetry
     mem_mb = get_current_memory_mb()

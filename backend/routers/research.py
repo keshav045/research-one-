@@ -27,6 +27,50 @@ router = APIRouter(
 )
 
 
+# ─── Direct LangGraph Execution Endpoint ──────────────────────────────────────
+
+
+@router.post("/graph/run", dependencies=[Depends(rate_limit_research)])
+async def run_research_via_graph(
+    req: StartResearchRequest,
+) -> dict[str, Any]:
+    """
+    Direct invocation of the ResearchLens LangGraph state machine.
+    Executes all nodes and conditional loops (retries up to 2 times), returning
+    the synthesized academic report, evidence citations, and retry history.
+    """
+    from ..services.research_graph import research_graph, MAX_RETRIES
+
+    state_input = {
+        "question": req.question,
+        "depth": req.depth.value,
+        "sources": [s.value for s in req.sources],
+        "max_retries": getattr(settings, "LANGGRAPH_MAX_RETRIES", MAX_RETRIES),
+        "retries": 0,
+    }
+
+    result = await research_graph.ainvoke(state_input)
+    if not result.get("allowed", False):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result.get("reject_reason", "Invalid research query."),
+        )
+
+    rep = result.get("report")
+    return {
+        "status": result.get("status", "completed"),
+        "question": req.question,
+        "limited_evidence": result.get("limited_evidence", False),
+        "retries": result.get("retries", 0),
+        "retry_history": result.get("retry_history", []),
+        "report": rep.model_dump() if rep else None,
+        "citations": [c.model_dump() for c in (result.get("citations") or [])],
+        "verified_count": len(result.get("verified") or []),
+        "rejected_count": len(result.get("rejected") or []),
+        "papers_count": len(result.get("ranked_papers") or []),
+    }
+
+
 # ─── Start Research ────────────────────────────────────────────────────────────
 
 

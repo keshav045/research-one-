@@ -30,63 +30,51 @@ You've probably noticed that LLMs frequently:
 
 ---
 
-## How It Works (Under the Hood)
+## How It Works: LangGraph State Machine with Adaptive Retry Loop
 
-Here is what happens when you enter a research question:
+ResearchLens orchestrates its multi-stage academic pipeline as an explicit, stateful **LangGraph** state machine. Instead of a rigid linear pipeline that fails when a tricky query yields few papers, ResearchLens features an **autonomous self-correcting retrieval loop**:
 
-```
+```text
 [ Your Research Question ]
            │
            ▼
-1. Pre-Flight Check & Query Planner
-   - Rejects non-research queries (e.g. casual chat, code snippets, random text pastes)
-   - Checks length (10 to 500 characters)
-   - Classifies query (Factual Lookup vs. Comparative Review)
-   - Generates targeted search phrases
+    [ preflight ] ────(rejected: casual chat / invalid)────► [ END ]
+           │
+           ▼ (ok)
+    [ plan_query ] (Classifies intent, decomposes sub-questions & search keywords)
            │
            ▼
-2. Multi-Source Retrieval
-   - Searches arXiv, Semantic Scholar, and OpenAlex concurrently
-   - Merges duplicates using DOI, arXiv ID, and title matching
-   - Preserves citation counts and open-access PDF links
+    [ retrieve ] ◄──────────────────────────────────────────────────────┐
+           │                                                            │
+           ▼                                                            │
+    [ rerank_fetch ] (MS-MARCO MiniLM reranking, PyMuPDF extraction)    │
+           │                                                            │
+           ▼                                                            │
+    [ verify_claims ] (DeBERTa-v3 NLI entailment & source match)        │
+           │                                                            │
+    [ Enough verified claims? ]                                         │
+      ├── No (and retries < 2) ──► [ rewrite_query ] ───────────────────┘
+      │                            (LLM rewriter broadens keywords)
+      │
+      └── Yes (or retries exhausted)
            │
            ▼
-3. Relevance Filtering & Reranking
-   - Uses cross-encoder rerankers (MS-MARCO MiniLM) to score candidates
-   - Disqualifies off-topic papers (even if they have 50,000+ citations)
-   - Selects the top relevant papers for full-text analysis
+    [ write_report ] (Academic synthesis, Reference [1] anchor locking)
            │
            ▼
-4. PDF Fetching & Cleanup
-   - Validates PDF magic bytes (%PDF-) to ignore broken HTML redirects
-   - Strips running headers, footers, and arXiv margin stamps (e.g. "arXiv:2103.14030v2")
-   - Chunks text into clean, windowed technical passages
-           │
-           ▼
-5. Paper-Scoped Vector Search
-   - Embeds passages using BAAI/bge-small-en-v1.5
-   - Scopes vector search strictly within each paper (zero cross-paper pollution)
-           │
-           ▼
-6. Two-Tier Claim Verification
-   - Tier 1: Checks for verbatim matching sentences in the source text
-   - Tier 2: Runs DeBERTa-v3 NLI to verify that the passage strictly entails the claim
-   - Discards any claim that doesn't meet the entailment threshold (≥ 0.80)
-           │
-           ▼
-7. Report Synthesis & Citation Locking
-   - Locks the primary foundational paper at Reference [1]
-   - Audits all [n] badges to make sure they match the reference list
-   - Builds a side-by-side comparison matrix and computes citation integrity scores
-           │
-           ▼
-[ Final Verified Academic Report ]
+        [ END ]
 ```
+
+### Why LangGraph Instead of a Plain Function Chain?
+1. **Explicit State & Conditional Cycles:** Academic research is non-linear. When initial candidate papers don't yield sufficient verifiable empirical facts, a plain linear chain fails with "no evidence". LangGraph makes the retry loop explicit, bounded (`MAX_RETRIES = 2`), and observable.
+2. **Granular Telemetry & Streaming:** Each node returns only its modified state keys (`TypedDict`), enabling live step streaming into Streamlit and FastAPI with zero state corruption.
+3. **Traceability & Testing:** Routing logic is isolated into pure conditional functions (`route_after_preflight`, `route_after_verify`) that can be tested in milliseconds without firing heavy neural models.
 
 ---
 
 ## Key Features
 
+- **Autonomous Self-Correction (LangGraph):** Automatically reformulates search phrases and re-queries academic sources if initial candidate papers don't corroborate enough claims.
 - **No Hallucinated Citations:** If a paper wasn't downloaded and verified, it doesn't get cited. Period.
 - **Smart Anchor Paper Locking:** The main paper answering your question is locked as Reference `[1]`. Secondary or follow-up papers never hijack the primary reference spot.
 - **Pre-Flight Query Guard:** Blocks spam, creative writing requests, and accidental paragraph pastes with friendly, clear guidance.
@@ -281,6 +269,25 @@ Yes! Set `LLM_PROVIDER=local` in `.env` and set `NLI_DEVICE=cpu`. The embedding 
 
 #### 3. Why was my question rejected?
 ResearchLens enforces research-focused queries between 10 and 500 characters. If you paste a random story or ask a generic question like *"write a poem"* or *"tell me a joke"*, the pre-flight guard will politely prompt you to ask an academic or scientific research question.
+
+---
+
+## 💼 LangGraph Engineering & Interview Talking Points
+
+### Resume Bullet
+> *Orchestrated the academic synthesis pipeline as a LangGraph state machine with conditional routing and an autonomous retrieval-retry loop triggered when NLI-verified empirical claims fall below threshold; improved evidence corroboration and prevented synthesis hallucinations across multi-hop research queries.*
+
+### Interview Q&A
+- **Why LangGraph instead of a plain linear chain?**
+  A linear chain is brittle: if initial keyword searches miss relevant preprints, the entire pipeline fails with an "insufficient evidence" error. LangGraph enables stateful cycles and conditional edges, turning retrieval into an adaptive, self-correcting loop.
+- **What is in the graph state, and what does each node return?**
+  State is a typed `ResearchState` (`TypedDict`) containing serializable fields (`question`, `sub_queries`, `papers`, `passages`, `verified`, `rejected`, `retries`). Each node strictly returns only the keys it updates, avoiding data pollution or unintended state overwrites.
+- **How do you prevent infinite retry loops?**
+  A strict `MAX_RETRIES = 2` guard is enforced by the conditional routing function (`route_after_verify`). LangGraph's internal recursion limit acts as an auxiliary safeguard, but application-level state bounds guarantee deterministic termination.
+- **What happens if retries are exhausted without enough evidence?**
+  The graph routes to `write_report`, which produces an honest, transparent report marked as **"Limited Evidence"**, clearly documenting which claims could not be corroborated rather than hallucinating facts.
+- **What would you improve next?**
+  Adding checkpointing (e.g., `MemorySaver` or SQLite checkpointer) for resumable investigations, and an optional human-in-the-loop review node when a report triggers the limited-evidence warning.
 
 ---
 

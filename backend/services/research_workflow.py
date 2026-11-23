@@ -291,9 +291,198 @@ def _build_insufficient_evidence_report(
 
 # ─── Main Pipeline Execution ──────────────────────────────────────────────────
 
+async def run_langgraph_research_pipeline(job_id: str, db: Session) -> None:
+    """
+    Executes the research process using the LangGraph state machine with an
+    autonomous retrieval-retry loop, streaming node state transitions to the database.
+    """
+    from .research_graph import research_graph, MAX_RETRIES
+
+    job = db.query(ResearchJob).filter(ResearchJob.id == job_id).first()
+    if not job:
+        logger.error("[Pipeline:LangGraph] Job %s not found", job_id)
+        return
+
+    pipeline = _make_pipeline()
+    job.set_pipeline(pipeline)
+    db.commit()
+
+    try:
+        initial_state = {
+            "question": job.question,
+            "depth": job.depth,
+            "sources": job.get_sources(),
+            "max_retries": getattr(settings, "LANGGRAPH_MAX_RETRIES", MAX_RETRIES),
+            "retries": 0,
+            "debug_info": {
+                "orchestrator": "LangGraph",
+                "seed_papers_enabled": getattr(settings, "SEED_PAPERS_ENABLED", True),
+                "disable_cache": getattr(settings, "DISABLE_CACHE", False),
+            },
+        }
+
+        accumulated_state: dict[str, Any] = dict(initial_state)
+
+        async for update in research_graph.astream(initial_state, stream_mode="updates"):
+            node_name, delta = next(iter(update.items()))
+            accumulated_state.update(delta)
+
+            if node_name == "preflight":
+                if not accumulated_state.get("allowed", False):
+                    reject_msg = accumulated_state.get("reject_reason", "Query rejected by preflight guard.")
+                    logger.warning("[Pipeline:LangGraph] Query rejected: %s", reject_msg)
+                    job.status = "failed"
+                    job.failure_reason = reject_msg
+                    for step in pipeline:
+                        if step["status"] == "active":
+                            step["status"] = "failed"
+                    job.set_pipeline(pipeline)
+                    db.commit()
+                    return
+
+                _advance_step(pipeline, "step-1", "step-2")
+                job.set_pipeline(pipeline)
+                db.commit()
+
+            elif node_name == "plan_query":
+                debug_info = accumulated_state.get("debug_info", {})
+                job.set_debug(debug_info)
+                job.set_stage_stats(accumulated_state.get("stage_stats", []))
+                _advance_step(pipeline, "step-1", "step-2")
+                job.set_pipeline(pipeline)
+                db.commit()
+
+            elif node_name == "retrieve":
+                debug_info = accumulated_state.get("debug_info", {})
+                job.set_debug(debug_info)
+                job.set_stage_stats(accumulated_state.get("stage_stats", []))
+                _advance_step(pipeline, "step-2", "step-3")
+                job.set_pipeline(pipeline)
+                db.commit()
+
+            elif node_name == "rerank_fetch":
+                ranked_papers = accumulated_state.get("ranked_papers", [])
+                anchor_paper = accumulated_state.get("anchor_paper")
+                job.anchor_paper_id = getattr(anchor_paper, "id", None)
+                job.passages_total = accumulated_state.get("passages_total", 0)
+
+                # Persist extracted papers and passages into database
+                for p in ranked_papers:
+                    passages_dicts = [pass_obj.model_dump() for pass_obj in (p.passages or [])]
+                    rec = PaperRecord(
+                        id=f"{job_id}::{p.id}",
+                        job_id=job_id,
+                        title=p.title,
+                        authors_json=json.dumps(p.authors),
+                        publication_year=p.publicationYear,
+                        journal_conference=p.journalConference,
+                        doi=p.doi,
+                        source=p.source,
+                        abstract=p.abstract,
+                        pdf_url=p.pdfUrl,
+                        full_text=p.fullText[:50000] if p.fullText else None,
+                        passages_json=json.dumps(passages_dicts),
+                    )
+                    db.merge(rec)
+                db.commit()
+
+                _advance_step(pipeline, "step-3", "step-4")
+                _advance_step(pipeline, "step-4", "step-5")
+                job.set_pipeline(pipeline)
+                job.set_debug(accumulated_state.get("debug_info", {}))
+                job.set_stage_stats(accumulated_state.get("stage_stats", []))
+                db.commit()
+
+            elif node_name == "verify_claims":
+                _advance_step(pipeline, "step-5", "step-6")
+                job.set_pipeline(pipeline)
+                job.set_debug(accumulated_state.get("debug_info", {}))
+                job.set_stage_stats(accumulated_state.get("stage_stats", []))
+                db.commit()
+
+            elif node_name == "rewrite_query":
+                retries = accumulated_state.get("retries", 1)
+                new_queries = accumulated_state.get("sub_queries", [])
+                max_retries = accumulated_state.get("max_retries", MAX_RETRIES)
+                logger.info(
+                    "[Pipeline:LangGraph] Self-correcting retry loop (%d/%d): rewriting queries to %s",
+                    retries, max_retries, new_queries,
+                )
+                for step in pipeline:
+                    if step["id"] == "step-2":
+                        step["status"] = "active"
+                        step["description"] = f"Self-correcting retrieval loop (Retry {retries}/{max_retries}): querying {', '.join(new_queries[:2])}"
+                    elif step["id"] in ("step-3", "step-4", "step-5", "step-6"):
+                        step["status"] = "pending"
+                job.set_pipeline(pipeline)
+                job.set_debug(accumulated_state.get("debug_info", {}))
+                job.set_stage_stats(accumulated_state.get("stage_stats", []))
+                db.commit()
+
+            elif node_name == "write_report":
+                _advance_step(pipeline, "step-6", "step-7")
+                _advance_step(pipeline, "step-7", None)
+                job.set_pipeline(pipeline)
+
+                report = accumulated_state.get("report")
+                citations = accumulated_state.get("citations", [])
+                verified = accumulated_state.get("verified", [])
+                ranked_papers = accumulated_state.get("ranked_papers", [])
+
+                metrics = _compute_metrics(citations, report) if report else None
+                job.status = accumulated_state.get("status", "completed")
+                job.failure_reason = accumulated_state.get("failure_reason") or (
+                    "; ".join(accumulated_state.get("status_reasons", [])) if accumulated_state.get("status_reasons") else None
+                )
+                job.papers_analyzed = len(ranked_papers)
+                job.total_papers = len(ranked_papers)
+                job.evidence_items = len(citations)
+                if metrics:
+                    job.verified_claims = metrics.verifiedClaims
+                    job.partially_supported_claims = metrics.partiallySupportedClaims
+                    job.unsupported_claims = metrics.unsupportedClaims
+                    job.contradicted_claims = metrics.contradictedClaims
+                    job.potential_conflicts = metrics.potentialConflicts
+                    job.citation_coverage = metrics.citationCoverage
+                    job.uncited_sentences = metrics.uncitedSentences
+
+                if report:
+                    job.set_report(report.model_dump())
+                job.set_debug(accumulated_state.get("debug_info", {}))
+                job.set_stage_stats(accumulated_state.get("stage_stats", []))
+                db.commit()
+
+                logger.info(
+                    "[Pipeline:LangGraph] Job %s finalized with status '%s'. Citation coverage: %s%%",
+                    job_id, job.status, getattr(job, "citation_coverage", 0),
+                )
+
+    except Exception as exc:
+        logger.exception("[Pipeline:LangGraph] Job %s failed with exception: %s", job_id, exc)
+        job.status = "failed"
+        job.error_message = str(exc)
+        job.failure_reason = f"Execution error: {exc}"
+        for step in pipeline:
+            if step["status"] == "active":
+                step["status"] = "failed"
+        job.set_pipeline(pipeline)
+        db.commit()
+
+
 async def run_research_pipeline(job_id: str, db: Session) -> None:
     """
-    Main async research pipeline executing Phases 1 to 8.
+    Main async research pipeline orchestrator.
+    Routes to LangGraph state machine by default (or legacy pipeline if disabled).
+    """
+    if getattr(settings, "USE_LANGGRAPH", True):
+        await run_langgraph_research_pipeline(job_id, db)
+    else:
+        await run_legacy_research_pipeline(job_id, db)
+
+
+async def run_legacy_research_pipeline(job_id: str, db: Session) -> None:
+    """
+    Legacy sequential async research pipeline executing Phases 1 to 8.
     """
     job = db.query(ResearchJob).filter(ResearchJob.id == job_id).first()
     if not job:

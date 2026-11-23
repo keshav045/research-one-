@@ -170,6 +170,10 @@ class Settings(BaseSettings):
     MAX_PDF_WORKERS: int = 6
     MAX_PDF_SIZE_BYTES: int = 80 * 1024 * 1024  # 80 MB PDF size cap
 
+    # Orchestration Engine
+    USE_LANGGRAPH: bool = True
+    LANGGRAPH_MAX_RETRIES: int = 2
+
     @property
     def is_openai_configured(self) -> bool:
         return bool(self.OPENAI_API_KEY) and self.OPENAI_API_KEY.strip() not in ("your_openai_api_key_here", "xxx", "")
